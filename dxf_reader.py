@@ -175,23 +175,44 @@ def chain_segments(segments: List[Segment]) -> List[Path]:
 
         closed = False
         while True:
+            extended = False
+
+            # 末尾方向へ伸ばす
             current_end = chain[-1].end
-            found = False
             for i, seg in enumerate(segments):
                 if used[i]:
                     continue
                 if points_equal(seg.start, current_end):
                     chain.append(seg)
                     used[i] = True
-                    found = True
+                    extended = True
+                    break
                 elif points_equal(seg.end, current_end):
                     chain.append(reverse_segment(seg))
                     used[i] = True
-                    found = True
-                if found:
+                    extended = True
                     break
-            if not found:
+
+            # 先頭方向へ伸ばす
+            if not extended:
+                current_start = chain[0].start
+                for i, seg in enumerate(segments):
+                    if used[i]:
+                        continue
+                    if points_equal(seg.end, current_start):
+                        chain.insert(0, seg)
+                        used[i] = True
+                        extended = True
+                        break
+                    elif points_equal(seg.start, current_start):
+                        chain.insert(0, reverse_segment(seg))
+                        used[i] = True
+                        extended = True
+                        break
+
+            if not extended:
                 break
+
             if points_equal(chain[-1].end, chain[0].start):
                 closed = True
                 break
