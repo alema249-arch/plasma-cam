@@ -1,0 +1,4 @@
+ezdxf>=1.0.0
+matplotlib>=3.5.0
+pyserial>=3.5
+shapely>=2.0.0
