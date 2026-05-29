@@ -866,8 +866,17 @@ class PlasmaCamApp:
             return
 
         gcode = generate_gcode(self.dxf_entries, settings)
-        lines = [l.strip() for l in gcode.split('\n')
-                 if l.strip() and not l.strip().startswith(';')]
+        lines = []
+        for l in gcode.split('\n'):
+            # コメント行をスキップ
+            stripped = l.strip()
+            if not stripped or stripped.startswith(';'):
+                continue
+            # インラインコメント（; 以降）を除去
+            if ';' in stripped:
+                stripped = stripped[:stripped.index(';')].strip()
+            if stripped:
+                lines.append(stripped)
         self.streaming = True
         self.send_btn.config(state=tk.DISABLED)
         threading.Thread(target=self._stream_thread, args=(lines,), daemon=True).start()

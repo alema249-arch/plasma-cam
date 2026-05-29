@@ -15,16 +15,20 @@ def generate_gcode(dxf_entries: list, settings: dict) -> str:
     lead_out_length = settings.get('lead_out_length', 0.0)
     kerf_width = settings.get('kerf_width', 0.0)
 
+    fr = int(feed_rate)  # GRBLは整数送り速度を推奨
+
     lines = [
         '; Plasma CAM G-code',
-        f'; Feed rate: {feed_rate} mm/min',
+        f'; Feed rate: {fr} mm/min',
         f'; Pierce delay: {pierce_delay} s',
         f'; Lead-in: {lead_in_length} mm ({lead_in_type})',
         f'; Lead-out: {lead_out_length} mm',
         f'; Kerf width: {kerf_width} mm',
         '',
-        'G21 ; mm mode',
-        'G90 ; absolute positioning',
+        'G21',   # mmモード
+        'G90',   # 絶対座標
+        'G94',   # 毎分送り（GRBL必須）
+        'M5',    # トーチ確実OFF
         'G0 X0 Y0',
         '',
     ]
@@ -56,10 +60,10 @@ def generate_gcode(dxf_entries: list, settings: dict) -> str:
                 offset_pts = compute_offset_points(path, kerf_width, is_inner=inner_flags[i])
 
             if offset_pts and len(offset_pts) >= 2:
-                _generate_offset_path(lines, offset_pts, feed_rate, pierce_delay,
+                _generate_offset_path(lines, offset_pts, fr, pierce_delay,
                                       lead_in_length, lead_out_length, px, py)
             else:
-                _generate_original_path(lines, path, feed_rate, pierce_delay,
+                _generate_original_path(lines, path, fr, pierce_delay,
                                         lead_in_length, lead_out_length, px, py)
 
             lines.append('M5 ; torch off')
@@ -83,14 +87,14 @@ def _generate_offset_path(lines, offset_pts, feed_rate, pierce_delay,
         lines.append(f'G0 X{px(lead_start[0]):.3f} Y{py(lead_start[1]):.3f}')
         lines.append('M3 ; torch on')
         lines.append(f'G4 P{pierce_delay:.2f} ; pierce delay')
-        lines.append(f'G1 X{px(start[0]):.3f} Y{py(start[1]):.3f} F{feed_rate} ; lead-in')
+        lines.append(f'G1 X{px(start[0]):.3f} Y{py(start[1]):.3f} F{fr} ; lead-in')
     else:
         lines.append(f'G0 X{px(start[0]):.3f} Y{py(start[1]):.3f}')
         lines.append('M3 ; torch on')
         lines.append(f'G4 P{pierce_delay:.2f} ; pierce delay')
 
     for pt in offset_pts[1:]:
-        lines.append(f'G1 X{px(pt[0]):.3f} Y{py(pt[1]):.3f} F{feed_rate}')
+        lines.append(f'G1 X{px(pt[0]):.3f} Y{py(pt[1]):.3f} F{fr}')
 
     if lead_out_length > 0 and len(offset_pts) >= 2:
         dx = offset_pts[-1][0] - offset_pts[-2][0]
@@ -99,7 +103,7 @@ def _generate_offset_path(lines, offset_pts, feed_rate, pierce_delay,
         lo_dir = (dx / d, dy / d) if d > 1e-10 else (1.0, 0.0)
         lo_end = (offset_pts[-1][0] + lo_dir[0] * lead_out_length,
                   offset_pts[-1][1] + lo_dir[1] * lead_out_length)
-        lines.append(f'G1 X{px(lo_end[0]):.3f} Y{py(lo_end[1]):.3f} F{feed_rate} ; lead-out')
+        lines.append(f'G1 X{px(lo_end[0]):.3f} Y{py(lo_end[1]):.3f} F{fr} ; lead-out')
 
 
 def _generate_original_path(lines, path, feed_rate, pierce_delay,
@@ -115,7 +119,7 @@ def _generate_original_path(lines, path, feed_rate, pierce_delay,
         lines.append(f'G0 X{px(lead_start[0]):.3f} Y{py(lead_start[1]):.3f}')
         lines.append('M3 ; torch on')
         lines.append(f'G4 P{pierce_delay:.2f} ; pierce delay')
-        lines.append(f'G1 X{px(start[0]):.3f} Y{py(start[1]):.3f} F{feed_rate} ; lead-in')
+        lines.append(f'G1 X{px(start[0]):.3f} Y{py(start[1]):.3f} F{fr} ; lead-in')
     else:
         lines.append(f'G0 X{px(start[0]):.3f} Y{py(start[1]):.3f}')
         lines.append('M3 ; torch on')
@@ -124,7 +128,7 @@ def _generate_original_path(lines, path, feed_rate, pierce_delay,
     for seg in path.segments:
         if seg.type == 'line':
             lines.append(
-                f'G1 X{px(seg.end[0]):.3f} Y{py(seg.end[1]):.3f} F{feed_rate}'
+                f'G1 X{px(seg.end[0]):.3f} Y{py(seg.end[1]):.3f} F{fr}'
             )
         elif seg.type == 'arc':
             cx, cy, r, sa, ea, ccw = seg.data
@@ -133,7 +137,7 @@ def _generate_original_path(lines, path, feed_rate, pierce_delay,
             cmd = 'G3' if ccw else 'G2'
             lines.append(
                 f'{cmd} X{px(seg.end[0]):.3f} Y{py(seg.end[1]):.3f} '
-                f'I{ix:.3f} J{iy:.3f} F{feed_rate}'
+                f'I{ix:.3f} J{iy:.3f} F{fr}'
             )
 
     if lead_out_length > 0:
@@ -143,7 +147,7 @@ def _generate_original_path(lines, path, feed_rate, pierce_delay,
             last_seg.end[0] + lo_dir[0] * lead_out_length,
             last_seg.end[1] + lo_dir[1] * lead_out_length,
         )
-        lines.append(f'G1 X{px(lo_end[0]):.3f} Y{py(lo_end[1]):.3f} F{feed_rate} ; lead-out')
+        lines.append(f'G1 X{px(lo_end[0]):.3f} Y{py(lo_end[1]):.3f} F{fr} ; lead-out')
 
 
 def _seg_direction_at_start(seg) -> tuple:
