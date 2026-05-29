@@ -607,16 +607,61 @@ class PlasmaCamApp:
             return
         try:
             baud = int(self.baud_var.get())
-            self.ser = serial.Serial(port, baud, timeout=1)
+            self.connect_btn.config(text='接続中...', state=tk.DISABLED)
+            self.root.update()
+
+            self.ser = serial.Serial(port, baud, timeout=2)
+
+            # GRBLの起動メッセージを待って読み捨て（約2秒）
+            time.sleep(2)
             self.ser.flushInput()
-            self.connect_btn.config(text='切断')
-            self.conn_status.config(text=f'接続中: {port} @ {baud} bps',
-                                    foreground='green')
+
+            # GRBLに空行を送って応答確認
+            self.ser.write(b'\r\n')
+            time.sleep(0.3)
+            resp = self.ser.read_all().decode('utf-8', errors='ignore').strip()
+
+            # 接続確認: 'ok' か 'Grbl' が含まれればOK
+            if resp and ('ok' in resp or 'Grbl' in resp or 'grbl' in resp.lower()):
+                grbl_ver = ''
+                for line in resp.splitlines():
+                    if 'Grbl' in line:
+                        grbl_ver = f'  ({line.strip()})'
+                        break
+                self.connect_btn.config(text='切断', state=tk.NORMAL)
+                self.conn_status.config(
+                    text=f'接続中: {port} @ {baud} bps{grbl_ver}',
+                    foreground='green')
+            else:
+                # 応答なしでも接続状態にはする（GRBLが既に起動済みの場合など）
+                self.connect_btn.config(text='切断', state=tk.NORMAL)
+                self.conn_status.config(
+                    text=f'接続中: {port} @ {baud} bps（応答待機中）',
+                    foreground='#FFA500')
+
             self.send_btn.config(state=tk.NORMAL)
             self.stop_btn.config(state=tk.NORMAL)
             self.polling = True
             threading.Thread(target=self._poll_thread, daemon=True).start()
+
+        except serial.SerialException as e:
+            self.ser = None
+            self.connect_btn.config(text='接続', state=tk.NORMAL)
+            self.conn_status.config(text='未接続', foreground='gray')
+            msg = str(e)
+            if 'Access is denied' in msg or 'PermissionError' in msg:
+                messagebox.showerror('接続エラー',
+                    f'{port} にアクセスできません。\n'
+                    '他のアプリ（Arduino IDE等）が使用中の可能性があります。')
+            elif 'could not open port' in msg.lower():
+                messagebox.showerror('接続エラー',
+                    f'{port} を開けません。\nデバイスが接続されているか確認してください。')
+            else:
+                messagebox.showerror('接続エラー', msg)
         except Exception as e:
+            self.ser = None
+            self.connect_btn.config(text='接続', state=tk.NORMAL)
+            self.conn_status.config(text='未接続', foreground='gray')
             messagebox.showerror('接続エラー', str(e))
 
     def _disconnect(self):
