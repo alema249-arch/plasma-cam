@@ -2,7 +2,8 @@ import ezdxf
 import math
 from typing import List, Tuple
 
-TOLERANCE = 0.01
+TOLERANCE = 0.1       # チェーン結合の許容距離 (mm)
+AUTO_CLOSE_TOL = 1.0  # この距離以内なら自動クローズ (mm)
 
 
 class Segment:
@@ -54,6 +55,10 @@ def arc_to_points(data, resolution=36):
 
 def points_equal(p1, p2, tol=TOLERANCE):
     return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
+
+
+def points_dist(p1, p2):
+    return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
 
 def entity_to_segments(entity) -> List[Segment]:
@@ -216,6 +221,12 @@ def chain_segments(segments: List[Segment]) -> List[Path]:
             if points_equal(chain[-1].end, chain[0].start):
                 closed = True
                 break
+
+        # 始点と終点が AUTO_CLOSE_TOL 以内なら自動クローズ
+        if not closed and len(chain) >= 2:
+            dist = points_dist(chain[0].start, chain[-1].end)
+            if dist <= AUTO_CLOSE_TOL:
+                closed = True
 
         paths.append(Path(chain, closed=closed))
 
