@@ -449,6 +449,11 @@ class PlasmaCamApp:
         self.conn_status = ttk.Label(cf, text='未接続', foreground='gray')
         self.conn_status.pack(padx=5, pady=(0, 4))
 
+        # オフラインモードボタン
+        self.offline_btn = ttk.Button(cf, text='オフラインモードで使用',
+                                      command=self._toggle_offline)
+        self.offline_btn.pack(fill=tk.X, padx=5, pady=(0, 5))
+
         self._refresh_ports()
 
     # ------------------------------------------------------------------ control tab
@@ -591,8 +596,39 @@ class PlasmaCamApp:
     def _refresh_ports(self):
         ports = [p.device for p in serial.tools.list_ports.comports()]
         self.port_cb['values'] = ports
-        if ports and not self.port_var.get():
-            self.port_var.set(ports[0])
+        if ports:
+            if not self.port_var.get() or self.port_var.get() not in ports:
+                self.port_var.set(ports[0])
+            self.connect_btn.config(state=tk.NORMAL)
+        else:
+            self.port_var.set('')
+            # 機械未接続の場合はボタンをグレーに
+            if not (self.ser and self.ser.is_open):
+                self.connect_btn.config(state=tk.DISABLED)
+            self.conn_status.config(text='デバイス未検出 (オフラインモード可)', foreground='#FFA500')
+
+    def _toggle_offline(self):
+        """オフラインモード: 機械なしでDXF・Gコード作業のみ行う"""
+        if getattr(self, '_offline_mode', False):
+            # オフライン解除
+            self._offline_mode = False
+            self.offline_btn.config(text='オフラインモードで使用')
+            self.conn_status.config(text='未接続', foreground='gray')
+            self.send_btn.config(state=tk.DISABLED)
+            self.stop_btn.config(state=tk.DISABLED)
+        else:
+            # オフラインON
+            self._offline_mode = True
+            self.offline_btn.config(text='オフライン解除')
+            self.conn_status.config(
+                text='オフラインモード (DXF・Gコードのみ)', foreground='#2196F3')
+            # Gコード保存は使えるようにする（送信ボタンは無効のまま）
+            messagebox.showinfo('オフラインモード',
+                'オフラインモードで起動しました。\n\n'
+                '✅ DXF読み込み\n'
+                '✅ 工具経路プレビュー\n'
+                '✅ Gコード保存\n'
+                '❌ 機械への送信（接続時のみ）')
 
     def _toggle_connect(self):
         if self.ser and self.ser.is_open:
