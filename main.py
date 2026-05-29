@@ -545,6 +545,8 @@ class PlasmaCamApp:
         mf = ttk.LabelFrame(parent, text='マシン制御')
         mf.pack(fill=tk.X, padx=5, pady=(0, 5))
 
+        ttk.Button(mf, text='🔓 アラーム解除  ($X)',
+                   command=self._unlock).pack(fill=tk.X, padx=5, pady=2)
         ttk.Button(mf, text='原点復帰  ($H)',
                    command=self._home).pack(fill=tk.X, padx=5, pady=2)
         ttk.Button(mf, text='ここを原点にする  (G92 X0 Y0)',
@@ -817,6 +819,13 @@ class PlasmaCamApp:
             return
         self._send_serial('G90 G0 X0 Y0')
 
+    def _unlock(self):
+        if not self.ser or not self.ser.is_open:
+            messagebox.showwarning('警告', '先に接続してください')
+            return
+        self._send_serial('$X')
+        self.conn_status.config(text='アラーム解除済み', foreground='green')
+
     def _home(self):
         if not self.ser or not self.ser.is_open:
             messagebox.showwarning('警告', '先に接続してください')
@@ -868,39 +877,79 @@ class PlasmaCamApp:
         gcode = generate_gcode(self.dxf_entries, settings)
         lines = []
         for l in gcode.split('\n'):
-            # コメント行をスキップ
             stripped = l.strip()
             if not stripped or stripped.startswith(';'):
                 continue
-            # インラインコメント（; 以降）を除去
             if ';' in stripped:
                 stripped = stripped[:stripped.index(';')].strip()
             if stripped:
                 lines.append(stripped)
+
+        # GRBLアラーム解除 ($X) を先頭に追加
+        lines = ['$X', ''] + lines
         self.streaming = True
         self.send_btn.config(state=tk.DISABLED)
         threading.Thread(target=self._stream_thread, args=(lines,), daemon=True).start()
 
     def _stream_thread(self, lines):
+        """GRBLバッファ充填方式ストリーミング (128バイトバッファ活用)"""
+        GRBL_BUF = 128
         total = len(lines)
+        sent_count = 0      # 送信済み行数
+        ack_count  = 0      # ok受信済み行数
+        buf_used   = 0      # バッファ使用量(バイト)
+        line_lens  = []     # 各行のバイト数
+        error_msg  = None
+
+        self.ser.timeout = 5  # タイムアウトを長めに
+
         try:
-            for i, line in enumerate(lines):
+            while ack_count < total:
                 if not self.streaming:
                     break
+
+                # バッファに余裕があれば次の行を送信
+                while sent_count < total:
+                    line = lines[sent_count]
+                    encoded = (line + '\n').encode()
+                    ln = len(encoded)
+                    if buf_used + ln > GRBL_BUF and line_lens:
+                        break  # バッファが埋まるので待つ
+                    with self.serial_lock:
+                        self.ser.write(encoded)
+                    line_lens.append(ln)
+                    buf_used += ln
+                    sent_count += 1
+
+                # GRBLからの応答を1行読む
                 with self.serial_lock:
-                    self.ser.write((line + '\n').encode())
                     resp = self.ser.readline().decode('utf-8', errors='ignore').strip()
-                if 'error' in resp.lower():
-                    self.root.after(0, lambda r=resp, l=line:
-                                    messagebox.showerror('GRBLエラー', f'コマンド: {l}\n応答: {r}'))
+
+                if not resp:
+                    continue
+
+                if resp.lower().startswith('ok'):
+                    if line_lens:
+                        buf_used -= line_lens.pop(0)
+                    ack_count += 1
+                    pct = int(ack_count / total * 100)
+                    self.root.after(0, lambda v=pct: self.progress.configure(value=v))
+
+                elif resp.lower().startswith('error'):
+                    # エラー発生行を特定
+                    err_line = lines[ack_count] if ack_count < total else '?'
+                    error_msg = f'コマンド: {err_line}\n応答: {resp}'
                     break
-                pct = int((i + 1) / total * 100)
-                self.root.after(0, lambda v=pct: self.progress.configure(value=v))
+
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror('送信エラー', str(e)))
+            error_msg = str(e)
         finally:
             self.streaming = False
+            if error_msg:
+                self.root.after(0, lambda m=error_msg:
+                                messagebox.showerror('GRBLエラー', m))
             self.root.after(0, lambda: self.send_btn.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.progress.configure(value=0))
 
     # ------------------------------------------------------------------ DXF
     def open_dxf(self):
