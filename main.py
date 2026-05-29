@@ -53,6 +53,37 @@ class PlasmaCamApp:
         self._build_ui()
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
 
+    # ------------------------------------------------------------------ scroll tab helper
+    def _make_scroll_tab(self, notebook, label):
+        """スクロール可能なタブを作成し、内側フレームを返す"""
+        outer = ttk.Frame(notebook)
+        notebook.add(outer, text=label)
+
+        canvas = tk.Canvas(outer, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        inner = ttk.Frame(canvas)
+        win_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+
+        def on_frame_configure(e):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+
+        def on_canvas_configure(e):
+            canvas.itemconfig(win_id, width=e.width)
+
+        def on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
+
+        inner.bind('<Configure>', on_frame_configure)
+        canvas.bind('<Configure>', on_canvas_configure)
+        canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', on_mousewheel))
+        canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
+
+        return inner
+
     # ------------------------------------------------------------------ menu
     def _build_menu(self):
         mb = tk.Menu(self.root)
@@ -92,39 +123,8 @@ class PlasmaCamApp:
         nb = ttk.Notebook(right)
         nb.pack(fill=tk.BOTH, expand=True)
 
-        # 設定タブ: スクロール対応
-        t1_outer = ttk.Frame(nb)
-        nb.add(t1_outer, text='  設定  ')
-        t1_canvas = tk.Canvas(t1_outer, borderwidth=0, highlightthickness=0)
-        t1_scroll = ttk.Scrollbar(t1_outer, orient=tk.VERTICAL, command=t1_canvas.yview)
-        t1_canvas.configure(yscrollcommand=t1_scroll.set)
-        t1_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        t1_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        t1 = ttk.Frame(t1_canvas)
-        t1_canvas.create_window((0, 0), window=t1, anchor='nw')
-        def _on_t1_configure(e):
-            t1_canvas.configure(scrollregion=t1_canvas.bbox('all'))
-            t1_canvas.itemconfig(1, width=t1_canvas.winfo_width())
-        t1.bind('<Configure>', _on_t1_configure)
-        # マウスホイールでスクロール
-        def _on_mousewheel(e):
-            t1_canvas.yview_scroll(int(-1*(e.delta/120)), 'units')
-        t1_canvas.bind_all('<MouseWheel>', _on_mousewheel)
-
-        # 機械制御タブ: スクロール対応
-        t2_outer = ttk.Frame(nb)
-        nb.add(t2_outer, text='  機械制御  ')
-        t2_canvas = tk.Canvas(t2_outer, borderwidth=0, highlightthickness=0)
-        t2_scroll = ttk.Scrollbar(t2_outer, orient=tk.VERTICAL, command=t2_canvas.yview)
-        t2_canvas.configure(yscrollcommand=t2_scroll.set)
-        t2_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        t2_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        t2 = ttk.Frame(t2_canvas)
-        t2_canvas.create_window((0, 0), window=t2, anchor='nw')
-        def _on_t2_configure(e):
-            t2_canvas.configure(scrollregion=t2_canvas.bbox('all'))
-            t2_canvas.itemconfig(1, width=t2_canvas.winfo_width())
-        t2.bind('<Configure>', _on_t2_configure)
+        t1 = self._make_scroll_tab(nb, '  設定  ')
+        t2 = self._make_scroll_tab(nb, '  機械制御  ')
 
         self._build_settings_tab(t1)
         self._build_control_tab(t2)
