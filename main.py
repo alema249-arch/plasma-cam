@@ -85,17 +85,46 @@ class PlasmaCamApp:
         self._init_canvas()
         self._connect_canvas_events()
 
-        right = ttk.Frame(main, width=300)
+        right = ttk.Frame(main, width=320)
         right.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
         right.pack_propagate(False)
 
         nb = ttk.Notebook(right)
         nb.pack(fill=tk.BOTH, expand=True)
 
-        t1 = ttk.Frame(nb)
-        nb.add(t1, text='  設定  ')
-        t2 = ttk.Frame(nb)
-        nb.add(t2, text='  機械制御  ')
+        # 設定タブ: スクロール対応
+        t1_outer = ttk.Frame(nb)
+        nb.add(t1_outer, text='  設定  ')
+        t1_canvas = tk.Canvas(t1_outer, borderwidth=0, highlightthickness=0)
+        t1_scroll = ttk.Scrollbar(t1_outer, orient=tk.VERTICAL, command=t1_canvas.yview)
+        t1_canvas.configure(yscrollcommand=t1_scroll.set)
+        t1_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        t1_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        t1 = ttk.Frame(t1_canvas)
+        t1_canvas.create_window((0, 0), window=t1, anchor='nw')
+        def _on_t1_configure(e):
+            t1_canvas.configure(scrollregion=t1_canvas.bbox('all'))
+            t1_canvas.itemconfig(1, width=t1_canvas.winfo_width())
+        t1.bind('<Configure>', _on_t1_configure)
+        # マウスホイールでスクロール
+        def _on_mousewheel(e):
+            t1_canvas.yview_scroll(int(-1*(e.delta/120)), 'units')
+        t1_canvas.bind_all('<MouseWheel>', _on_mousewheel)
+
+        # 機械制御タブ: スクロール対応
+        t2_outer = ttk.Frame(nb)
+        nb.add(t2_outer, text='  機械制御  ')
+        t2_canvas = tk.Canvas(t2_outer, borderwidth=0, highlightthickness=0)
+        t2_scroll = ttk.Scrollbar(t2_outer, orient=tk.VERTICAL, command=t2_canvas.yview)
+        t2_canvas.configure(yscrollcommand=t2_scroll.set)
+        t2_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        t2_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        t2 = ttk.Frame(t2_canvas)
+        t2_canvas.create_window((0, 0), window=t2, anchor='nw')
+        def _on_t2_configure(e):
+            t2_canvas.configure(scrollregion=t2_canvas.bbox('all'))
+            t2_canvas.itemconfig(1, width=t2_canvas.winfo_width())
+        t2.bind('<Configure>', _on_t2_configure)
 
         self._build_settings_tab(t1)
         self._build_control_tab(t2)
