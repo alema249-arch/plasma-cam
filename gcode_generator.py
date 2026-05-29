@@ -73,7 +73,7 @@ def generate_gcode(dxf_entries: list, settings: dict) -> str:
     return '\n'.join(lines)
 
 
-def _generate_offset_path(lines, offset_pts, feed_rate, pierce_delay,
+def _generate_offset_path(lines, offset_pts, fr, pierce_delay,
                            lead_in_length, lead_out_length, px, py):
     start = offset_pts[0]
 
@@ -106,7 +106,7 @@ def _generate_offset_path(lines, offset_pts, feed_rate, pierce_delay,
         lines.append(f'G1 X{px(lo_end[0]):.3f} Y{py(lo_end[1]):.3f} F{fr} ; lead-out')
 
 
-def _generate_original_path(lines, path, feed_rate, pierce_delay,
+def _generate_original_path(lines, path, fr, pierce_delay,
                               lead_in_length, lead_out_length, px, py):
     start = path.segments[0].start
 
