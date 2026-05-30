@@ -510,7 +510,12 @@ class PlasmaCamApp:
         self.info_label = ttk.Label(ff, text='未選択', font=('', 8))
         self.info_label.pack(padx=5, pady=(0,3))
 
-        ttk.Button(parent, text='💾 Gコードを保存', command=self.save_gcode).pack(fill=tk.X, padx=5, pady=2)
+        btn_row_gc = ttk.Frame(parent)
+        btn_row_gc.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Button(btn_row_gc, text='🔍 Gコードプレビュー',
+                   command=self.show_gcode_preview).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        ttk.Button(btn_row_gc, text='💾 保存',
+                   command=self.save_gcode).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
 
         # ---- オフセット ----
         of = ttk.LabelFrame(parent, text='オフセット (mm)')
@@ -1165,7 +1170,170 @@ class PlasmaCamApp:
             'lead_out_length': float(self.lead_out_length.get()),
         }
 
-    def save_gcode(self):
+    def show_gcode_preview(self):
+        """Gコードプレビューウィンドウを表示"""
+        if not self.dxf_entries:
+            messagebox.showwarning('警告', 'DXFファイルを先に開いてください')
+            return
+        try:
+            settings = self._get_settings()
+            gcode = generate_gcode(self.dxf_entries, settings)
+        except ValueError:
+            messagebox.showerror('エラー', '設定値に無効な数値があります')
+            return
+        except Exception as e:
+            messagebox.showerror('エラー', str(e))
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title('Gコードプレビュー')
+        win.geometry('720x620')
+        win.configure(bg='#0e0e0e')
+
+        # ── ツールバー ──
+        toolbar = tk.Frame(win, bg='#1a1a2e', pady=4)
+        toolbar.pack(fill=tk.X)
+
+        lines = gcode.split('\n')
+        stat = tk.Label(toolbar,
+                        text=f'  行数: {len(lines)}   文字数: {len(gcode)}',
+                        bg='#1a1a2e', fg='#aaccff', font=('', 9))
+        stat.pack(side=tk.LEFT, padx=8)
+
+        tk.Button(toolbar, text='💾 保存', bg='#2255cc', fg='white',
+                  relief='flat', cursor='hand2', font=('', 9, 'bold'),
+                  command=lambda: self._save_from_preview(gcode)
+                  ).pack(side=tk.RIGHT, padx=6)
+        tk.Button(toolbar, text='📋 コピー', bg='#334455', fg='white',
+                  relief='flat', cursor='hand2', font=('', 9),
+                  command=lambda: self._copy_to_clipboard(gcode)
+                  ).pack(side=tk.RIGHT, padx=2)
+
+        # ── 検索バー ──
+        search_bar = tk.Frame(win, bg='#1a1a2e', pady=3)
+        search_bar.pack(fill=tk.X)
+        tk.Label(search_bar, text='🔍', bg='#1a1a2e', fg='#aaccff').pack(side=tk.LEFT, padx=6)
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(search_bar, textvariable=search_var,
+                                bg='#2a2a3e', fg='white', insertbackground='white',
+                                relief='flat', font=('Consolas', 9), width=20)
+        search_entry.pack(side=tk.LEFT, padx=4)
+        search_result = tk.Label(search_bar, text='', bg='#1a1a2e',
+                                 fg='#88ccff', font=('', 8))
+        search_result.pack(side=tk.LEFT, padx=4)
+
+        # ── テキスト + 行番号 ──
+        text_frame = tk.Frame(win, bg='#0e0e0e')
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(4, 0))
+
+        # 行番号キャンバス
+        line_canvas = tk.Canvas(text_frame, width=48, bg='#1a1a1a',
+                                highlightthickness=0)
+        line_canvas.pack(side=tk.LEFT, fill=tk.Y)
+
+        v_sb = tk.Scrollbar(text_frame, orient=tk.VERTICAL)
+        h_sb = tk.Scrollbar(win, orient=tk.HORIZONTAL)
+        v_sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        text = tk.Text(text_frame, bg='#0e0e0e', fg='#cccccc',
+                       font=('Consolas', 10), wrap='none',
+                       insertbackground='white',
+                       yscrollcommand=v_sb.set,
+                       xscrollcommand=h_sb.set,
+                       state=tk.NORMAL)
+        text.pack(fill=tk.BOTH, expand=True)
+        v_sb.config(command=text.yview)
+        h_sb.pack(fill=tk.X, padx=4, pady=(0, 4))
+        h_sb.config(command=text.xview)
+
+        # カラータグ設定
+        text.tag_config('comment', foreground='#555577')
+        text.tag_config('rapid',   foreground='#ff8844')
+        text.tag_config('feed',    foreground='#44cc88')
+        text.tag_config('arc',     foreground='#44aaff')
+        text.tag_config('torch',   foreground='#ffcc00')
+        text.tag_config('coord',   foreground='#aaddff')
+        text.tag_config('search',  background='#ffcc00', foreground='#000')
+
+        # Gコードを挿入してシンタックスハイライト
+        for line in lines:
+            s = line.strip()
+            if s.startswith(';') or not s:
+                tag = 'comment'
+            elif s.startswith('G0'):
+                tag = 'rapid'
+            elif s.startswith('G1'):
+                tag = 'feed'
+            elif s.startswith('G2') or s.startswith('G3'):
+                tag = 'arc'
+            elif s.startswith('M3') or s.startswith('M5'):
+                tag = 'torch'
+            else:
+                tag = 'coord'
+            text.insert(tk.END, line + '\n', tag)
+
+        text.config(state=tk.DISABLED)
+
+        # 行番号描画
+        def _draw_linenos(e=None):
+            line_canvas.delete('all')
+            first = text.index('@0,0')
+            last  = text.index(f'@0,{text.winfo_height()}')
+            fl = int(first.split('.')[0])
+            ll = int(last.split('.')[0])
+            for n in range(fl, ll + 1):
+                y = text.dlineinfo(f'{n}.0')
+                if y:
+                    line_canvas.create_text(
+                        44, y[1] + y[3]//2,
+                        text=str(n), anchor='e',
+                        fill='#556677', font=('Consolas', 9))
+
+        text.bind('<Configure>', _draw_linenos)
+        text.bind('<KeyRelease>', _draw_linenos)
+
+        def _on_yview(*args):
+            text.yview(*args)
+            _draw_linenos()
+
+        v_sb.config(command=_on_yview)
+
+        # 検索機能
+        def _do_search(*_):
+            text.config(state=tk.NORMAL)
+            text.tag_remove('search', '1.0', tk.END)
+            kw = search_var.get().strip()
+            if not kw:
+                search_result.config(text='')
+                text.config(state=tk.DISABLED)
+                return
+            count = 0
+            start = '1.0'
+            while True:
+                pos = text.search(kw, start, stopindex=tk.END)
+                if not pos:
+                    break
+                end = f'{pos}+{len(kw)}c'
+                text.tag_add('search', pos, end)
+                start = end
+                count += 1
+                if count == 1:
+                    text.see(pos)
+            search_result.config(text=f'{count} 件')
+            text.config(state=tk.DISABLED)
+
+        search_var.trace_add('write', _do_search)
+        win.after(100, _draw_linenos)
+
+    def _save_from_preview(self, gcode):
+        self.save_gcode(gcode_override=gcode)
+
+    def _copy_to_clipboard(self, text):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        messagebox.showinfo('コピー完了', 'Gコードをクリップボードにコピーしました')
+
+    def save_gcode(self, gcode_override=None):
         if not self.dxf_entries:
             messagebox.showwarning('警告', 'DXFファイルを先に開いてください')
             return
@@ -1182,7 +1350,7 @@ class PlasmaCamApp:
         if not filename:
             return
         try:
-            gcode = generate_gcode(self.dxf_entries, settings)
+            gcode = gcode_override if gcode_override else generate_gcode(self.dxf_entries, settings)
             with open(filename, 'w') as f:
                 f.write(gcode)
             messagebox.showinfo('完了', f'Gコードを保存しました:\n{filename}')
