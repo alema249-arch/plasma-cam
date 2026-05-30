@@ -97,82 +97,100 @@ class PlasmaCamApp:
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
-        # 上下ペイン（サッシをドラッグしてリサイズ可能）
-        outer = tk.PanedWindow(self.root, orient=tk.VERTICAL,
-                               sashwidth=6, sashrelief='raised',
-                               sashpad=2, bg='#888')
-        outer.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 左右水平分割（サッシでリサイズ可能）
+        h_pane = tk.PanedWindow(self.root, orient=tk.HORIZONTAL,
+                                sashwidth=6, sashrelief='raised', bg='#888')
+        h_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        main = ttk.Frame(outer)
-        outer.add(main, minsize=300, stretch='always')
-
-        con_frame = ttk.LabelFrame(outer, text='📟 コンソール (GRBL通信ログ) ← ここをドラッグでリサイズ')
-        outer.add(con_frame, minsize=100, stretch='never')
-
-        # 初期サイズ：起動後にサッシ位置を設定
-        def _set_sash(e=None):
-            h = self.root.winfo_height()
-            if h > 400:
-                outer.sash_place(0, 0, h - 200)
-                self.root.unbind('<Map>')
-        self.root.bind('<Map>', _set_sash)
-
-        self.console = tk.Text(con_frame, height=6, bg='#0e0e0e', fg='#00ff88',
-                               font=('Consolas', 9), wrap='none',
-                               insertbackground='white', state=tk.DISABLED)
-        con_sb = ttk.Scrollbar(con_frame, command=self.console.yview)
-        self.console.configure(yscrollcommand=con_sb.set)
-        con_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.console.pack(fill=tk.BOTH, expand=True)
-
-        input_row = ttk.Frame(con_frame)
-        input_row.pack(fill=tk.X, padx=4, pady=(2, 4))
-
-        ttk.Label(input_row, text='>>>', font=('Consolas', 10, 'bold'),
-                  foreground='#88ccff').pack(side=tk.LEFT, padx=(2, 4))
-        self.manual_cmd = tk.StringVar()
-        cmd_entry = ttk.Entry(input_row, textvariable=self.manual_cmd,
-                              font=('Consolas', 10), width=30)
-        cmd_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        cmd_entry.bind('<Return>', lambda e: self._send_manual_cmd())
-        cmd_entry.bind('<Up>',     lambda e: self._cmd_history(-1))
-        cmd_entry.bind('<Down>',   lambda e: self._cmd_history(1))
-
-        ttk.Button(input_row, text='送信', command=self._send_manual_cmd,
-                   width=6).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(input_row, text='クリア', command=self._clear_console,
-                   width=6).pack(side=tk.LEFT)
-
-        self._cmd_hist = []   # コマンド履歴
-        self._cmd_hist_idx = 0
-
-        cf = ttk.LabelFrame(main, text='マシンビュー / DXFプレビュー')
-        cf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # ── 左: キャンバス ──
+        cf = ttk.LabelFrame(h_pane, text='マシンビュー / DXFプレビュー')
+        h_pane.add(cf, minsize=400, stretch='always')
 
         self.fig, self.ax = plt.subplots(figsize=(9, 7))
         self.fig.subplots_adjust(bottom=0.05, top=0.95)
         self.canvas_widget = FigureCanvasTkAgg(self.fig, master=cf)
         self.canvas_widget.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
         hint = ttk.Label(cf,
                          text='🖱 左ドラッグ: 選択ファイルを移動   右ドラッグ: 視点移動   ホイール: ズーム',
                          foreground='#555')
         hint.pack(pady=(0, 3))
-
         self._init_canvas()
         self._connect_canvas_events()
 
-        right = ttk.Frame(main, width=340)
-        right.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
+        # ── 中央: 設定タブ ──
+        right = ttk.Frame(h_pane, width=340)
         right.pack_propagate(False)
+        h_pane.add(right, minsize=320, stretch='never')
 
         nb = ttk.Notebook(right)
         nb.pack(fill=tk.BOTH, expand=True)
-
         t1 = ttk.Frame(nb)
         nb.add(t1, text='  設定  ')
         t2 = ttk.Frame(nb)
         nb.add(t2, text='  機械制御  ')
+
+        # ── 右: コンソール（縦）──
+        con_outer = tk.PanedWindow(h_pane, orient=tk.VERTICAL,
+                                   sashwidth=0, bg='#ccc')
+        h_pane.add(con_outer, minsize=220, stretch='never')
+
+        con_frame = tk.Frame(con_outer, bg='#0e0e0e', bd=1, relief='sunken')
+        con_outer.add(con_frame, stretch='always')
+
+        # タイトルバー
+        title_bar = tk.Frame(con_frame, bg='#1a1a2e', height=24)
+        title_bar.pack(fill=tk.X)
+        title_bar.pack_propagate(False)
+        tk.Label(title_bar, text='📟 GRBL コンソール',
+                 bg='#1a1a2e', fg='#88ccff',
+                 font=('Yu Gothic UI', 9, 'bold')).pack(side=tk.LEFT, padx=6)
+        tk.Button(title_bar, text='クリア', bg='#2a2a4e', fg='#aaaacc',
+                  relief='flat', font=('', 8), cursor='hand2',
+                  command=self._clear_console).pack(side=tk.RIGHT, padx=4, pady=2)
+
+        # ログ表示
+        log_frame = tk.Frame(con_frame, bg='#0e0e0e')
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        con_sb = tk.Scrollbar(log_frame, bg='#333')
+        self.console = tk.Text(log_frame, bg='#0e0e0e', fg='#00ff88',
+                               font=('Consolas', 9), wrap='word',
+                               insertbackground='white', state=tk.DISABLED,
+                               yscrollcommand=con_sb.set, bd=0)
+        con_sb.config(command=self.console.yview)
+        con_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.console.pack(fill=tk.BOTH, expand=True, padx=2)
+
+        # 入力エリア
+        input_frame = tk.Frame(con_frame, bg='#1a1a2e', pady=4)
+        input_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        tk.Label(input_frame, text='>>>', bg='#1a1a2e', fg='#88ccff',
+                 font=('Consolas', 10, 'bold')).pack(side=tk.LEFT, padx=(6, 2))
+
+        self.manual_cmd = tk.StringVar()
+        self._cmd_hist = []
+        self._cmd_hist_idx = 0
+
+        cmd_entry = tk.Entry(input_frame, textvariable=self.manual_cmd,
+                             bg='#0e0e1e', fg='#ffffff', insertbackground='#88ccff',
+                             font=('Consolas', 10), relief='flat', bd=2)
+        cmd_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        cmd_entry.bind('<Return>', lambda e: self._send_manual_cmd())
+        cmd_entry.bind('<Up>',     lambda e: self._cmd_history(-1))
+        cmd_entry.bind('<Down>',   lambda e: self._cmd_history(1))
+
+        tk.Button(input_frame, text='送信', bg='#2255cc', fg='white',
+                  font=('', 9, 'bold'), relief='flat', cursor='hand2',
+                  command=self._send_manual_cmd).pack(side=tk.LEFT, padx=(0, 6))
+
+        # 初期サッシ位置（設定タブ340px、コンソール240px）
+        def _set_sash(e=None):
+            w = self.root.winfo_width()
+            if w > 800:
+                h_pane.sash_place(0, w - 340 - 240, 0)
+                h_pane.sash_place(1, w - 240, 0)
+                self.root.unbind('<Map>')
+        self.root.bind('<Map>', _set_sash)
 
         self._build_settings_tab(t1)
         self._build_control_tab(t2)
