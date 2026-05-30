@@ -1582,274 +1582,255 @@ class PlasmaCamApp:
 
 
 # ======================================================================
-# SimWindow: トーチ動作シミュレーション
+# SimWindow: トーチ動作シミュレーション (tkinter Canvas版)
 # ======================================================================
 class SimWindow:
     SPEEDS = [('×0.25', 0.25), ('×0.5', 0.5), ('×1', 1.0),
               ('×2', 2.0), ('×5', 5.0), ('×10', 10.0), ('×50', 50.0)]
-    STEP_MS = 30          # アニメーション更新間隔 (ms)
-    MM_PER_STEP_CUT = 2.0 # 1ステップで進む距離(切削)
-    MM_PER_STEP_RAP = 8.0 # 1ステップで進む距離(早送り)
+    INTERVAL_MS = 20      # タイマー間隔(ms) — 固定
+    MM_PER_TICK_CUT = 1.5 # 1tickで進む距離(切削)
+    MM_PER_TICK_RAP = 6.0 # 1tickで進む距離(早送り)
 
     def __init__(self, parent, moves, dxf_entries):
         self.moves   = moves
         self.entries = dxf_entries
-        self._idx    = 0
-        self._playing = False
-        self._speed  = 1.0
+        self._playing  = False
+        self._speed    = 1.0
         self._after_id = None
+        self._target   = 0
+        self._cur_x    = moves[0]['x'] if moves else 0.0
+        self._cur_y    = moves[0]['y'] if moves else 0.0
 
-        # 現在位置（補間用）
-        self._cur_x = moves[0]['x'] if moves else 0.0
-        self._cur_y = moves[0]['y'] if moves else 0.0
-        self._target = 0   # 次に向かうmovesのインデックス
-
-        # トレース用バッファ
-        self._trace_rapid = []   # [(x1,y1,x2,y2), ...]
-        self._trace_cut   = []
-        self._trace_cur_seg = []  # 現在描画中のセグメント
+        # 座標範囲を計算
+        xs = [m['x'] for m in moves]
+        ys = [m['y'] for m in moves]
+        self._xmin = min(xs); self._xmax = max(xs)
+        self._ymin = min(ys); self._ymax = max(ys)
 
         self._build(parent)
-        self._draw_geometry()
         self._reset()
 
+    # ── 座標変換 ──────────────────────────────────────────
+    def _to_canvas(self, x, y):
+        W = self._cv.winfo_width()  or 800
+        H = self._cv.winfo_height() or 600
+        pad = 40
+        rng_x = max(self._xmax - self._xmin, 1)
+        rng_y = max(self._ymax - self._ymin, 1)
+        scale = min((W - pad*2) / rng_x, (H - pad*2) / rng_y)
+        cx = pad + (x - self._xmin) * scale
+        cy = H - pad - (y - self._ymin) * scale   # Y軸反転
+        return cx, cy
+
+    # ── UI構築 ──────────────────────────────────────────
     def _build(self, parent):
         win = tk.Toplevel(parent)
-        win.title('▶ 動作プレビュー（シミュレーション）')
-        win.geometry('900x680')
-        win.configure(bg='#0e0e14')
+        win.title('▶ 動作プレビュー')
+        win.geometry('920x700')
+        win.configure(bg='#0a0a12')
         self._win = win
         win.protocol('WM_DELETE_WINDOW', self._on_close)
 
         # ── ツールバー ──
-        tb = tk.Frame(win, bg='#1a1a2e', pady=5)
+        tb = tk.Frame(win, bg='#12122a', pady=6)
         tb.pack(fill=tk.X)
 
-        self._play_btn = tk.Button(tb, text='▶ 再生', bg='#2255cc', fg='white',
-                                   font=('Yu Gothic UI', 10, 'bold'), relief='flat',
-                                   cursor='hand2', padx=12,
-                                   command=self._toggle_play)
+        self._play_btn = tk.Button(
+            tb, text='▶  再生', bg='#1144bb', fg='white',
+            font=('Yu Gothic UI', 11, 'bold'), relief='flat',
+            cursor='hand2', padx=14, command=self._toggle_play)
         self._play_btn.pack(side=tk.LEFT, padx=8)
 
-        tk.Button(tb, text='⏹ リセット', bg='#334455', fg='white',
-                  font=('Yu Gothic UI', 9), relief='flat', cursor='hand2', padx=8,
+        tk.Button(tb, text='⏹ リセット', bg='#223344', fg='#aaccee',
+                  font=('Yu Gothic UI', 9), relief='flat',
+                  cursor='hand2', padx=10,
                   command=self._reset).pack(side=tk.LEFT, padx=4)
 
-        # 速度選択
-        tk.Label(tb, text='速度:', bg='#1a1a2e', fg='#aaccff',
-                 font=('Yu Gothic UI', 9)).pack(side=tk.LEFT, padx=(16, 4))
+        tk.Label(tb, text='速度:', bg='#12122a',
+                 fg='#8899bb', font=('', 9)).pack(side=tk.LEFT, padx=(16,2))
         self._speed_var = tk.StringVar(value='×1')
         speed_cb = ttk.Combobox(tb, textvariable=self._speed_var,
                                 values=[s[0] for s in self.SPEEDS],
                                 width=6, state='readonly')
         speed_cb.pack(side=tk.LEFT)
-        speed_cb.bind('<<ComboboxSelected>>', self._on_speed_change)
+        speed_cb.bind('<<ComboboxSelected>>', self._on_speed)
 
-        # 進捗表示
-        self._info_var = tk.StringVar(value='準備完了')
-        tk.Label(tb, textvariable=self._info_var, bg='#1a1a2e', fg='#88ccff',
-                 font=('Consolas', 9)).pack(side=tk.LEFT, padx=16)
+        self._info_var = tk.StringVar(value='▶ を押して開始')
+        tk.Label(tb, textvariable=self._info_var, bg='#12122a',
+                 fg='#88ccff', font=('Consolas', 9)).pack(side=tk.LEFT, padx=16)
 
-        # トーチ状態
-        self._torch_var = tk.StringVar(value='🔴 トーチOFF')
+        self._torch_var = tk.StringVar(value='● トーチOFF')
         self._torch_lbl = tk.Label(tb, textvariable=self._torch_var,
-                                   bg='#1a1a2e', fg='#ff4444',
+                                   bg='#12122a', fg='#ff4444',
                                    font=('Yu Gothic UI', 10, 'bold'))
-        self._torch_lbl.pack(side=tk.RIGHT, padx=12)
-
-        # ── プログレスバー ──
-        self._progress = ttk.Progressbar(win, mode='determinate')
-        self._progress.pack(fill=tk.X, padx=8, pady=(2, 0))
+        self._torch_lbl.pack(side=tk.RIGHT, padx=14)
 
         # ── 凡例 ──
-        leg = tk.Frame(win, bg='#0e0e14')
-        leg.pack(fill=tk.X, padx=8)
-        for color, label in [('#ff8833','早送り(ラピッド)'),
-                              ('#44ff88','切削移動'),
-                              ('#ffffff','現在のトーチ位置')]:
-            tk.Frame(leg, bg=color, width=16, height=4).pack(side=tk.LEFT, padx=(8,2), pady=4)
-            tk.Label(leg, text=label, bg='#0e0e14', fg='#aaaaaa',
-                     font=('', 8)).pack(side=tk.LEFT, padx=(0, 12))
+        leg = tk.Frame(win, bg='#0a0a12')
+        leg.pack(fill=tk.X, padx=6, pady=2)
+        for col, lbl in [('#ff8833','早送り'), ('#44ff88','切削'),
+                          ('#ffff00','トーチ位置')]:
+            tk.Frame(leg, bg=col, width=20, height=4).pack(
+                side=tk.LEFT, padx=(8,2))
+            tk.Label(leg, text=lbl, bg='#0a0a12', fg='#778899',
+                     font=('',8)).pack(side=tk.LEFT, padx=(0,12))
 
-        # ── matplotlib キャンバス ──
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        self._fig = Figure(figsize=(9, 6), dpi=96, facecolor='#0e0e14')
-        self._ax  = self._fig.add_subplot(111)
-        self._ax.set_facecolor('#080810')
-        self._ax.tick_params(colors='#556677')
-        for sp in self._ax.spines.values():
-            sp.set_edgecolor('#223344')
-        self._ax.grid(True, color='#112233', linewidth=0.5)
-        self._ax.set_aspect('equal', adjustable='datalim')
-        self._ax.set_xlabel('X (mm)', color='#556677')
-        self._ax.set_ylabel('Y (mm)', color='#556677')
-        self._fig.tight_layout(pad=1.5)
+        # ── プログレスバー ──
+        self._prog = ttk.Progressbar(win, mode='determinate')
+        self._prog.pack(fill=tk.X, padx=8, pady=(0,2))
 
-        self._mpl_canvas = FigureCanvasTkAgg(self._fig, master=win)
-        self._mpl_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        # ── Canvas ──
+        self._cv = tk.Canvas(win, bg='#050508',
+                             highlightthickness=0)
+        self._cv.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self._cv.bind('<Configure>', lambda e: self._redraw_all())
 
-    def _draw_geometry(self):
-        """DXF形状を薄く描画"""
-        for entry in self.entries:
-            ox, oy = entry['offset_x'], entry['offset_y']
-            for path in entry['paths']:
-                pts = path.get_display_points()
-                if len(pts) < 2:
-                    continue
-                xs = [p[0]+ox for p in pts]
-                ys = [p[1]+oy for p in pts]
-                self._ax.plot(xs, ys, color='#334455', linewidth=0.8,
-                              alpha=0.6, zorder=1)
-
-        # 軸範囲を全movesに合わせる
-        if self.moves:
-            xs = [m['x'] for m in self.moves]
-            ys = [m['y'] for m in self.moves]
-            mx, mn = max(xs), min(xs)
-            my, mny = max(ys), min(ys)
-            pad = max((mx-mn)*0.1, (my-mny)*0.1, 20)
-            self._ax.set_xlim(mn-pad, mx+pad)
-            self._ax.set_ylim(mny-pad, my+pad)
-
-        self._mpl_canvas.draw()
-
+    # ── リセット ────────────────────────────────────────
     def _reset(self):
         self._stop()
         self._target = 0
         if self.moves:
             self._cur_x = self.moves[0]['x']
             self._cur_y = self.moves[0]['y']
-        self._trace_rapid = []
-        self._trace_cut   = []
-        self._trace_cur_seg = []
-        self._progress['value'] = 0
-        self._info_var.set('準備完了 — ▶ で開始')
-        self._torch_var.set('🔴 トーチOFF')
+        self._prog['value'] = 0
+        self._info_var.set('▶ を押して開始')
+        self._torch_var.set('● トーチOFF')
         self._torch_lbl.config(fg='#ff4444')
-        self._play_btn.config(text='▶ 再生')
+        self._play_btn.config(text='▶  再生')
+        self._redraw_all()
 
-        # 描画をジオメトリのみに戻す
-        while len(self._ax.lines) > 0:
-            self._ax.lines[0].remove()
-        self._draw_geometry()
-        self._mpl_canvas.draw_idle()
+    def _redraw_all(self):
+        """キャンバスをクリアしてDXFジオメトリを再描画"""
+        self._cv.delete('all')
+        # グリッド
+        W = self._cv.winfo_width()  or 800
+        H = self._cv.winfo_height() or 600
+        for i in range(0, W, 50):
+            self._cv.create_line(i, 0, i, H, fill='#111122', width=1)
+        for i in range(0, H, 50):
+            self._cv.create_line(0, i, W, i, fill='#111122', width=1)
+        # DXFジオメトリ
+        for entry in self.entries:
+            ox, oy = entry['offset_x'], entry['offset_y']
+            for path in entry['paths']:
+                pts = path.get_display_points()
+                if len(pts) < 2:
+                    continue
+                coords = []
+                for p in pts:
+                    cx, cy = self._to_canvas(p[0]+ox, p[1]+oy)
+                    coords += [cx, cy]
+                self._cv.create_line(*coords, fill='#223355',
+                                     width=1, tags='geo')
 
+    # ── 再生制御 ────────────────────────────────────────
     def _toggle_play(self):
         if self._playing:
             self._stop()
         else:
+            if self._target >= len(self.moves):
+                self._reset()
             self._play()
 
     def _play(self):
-        if self._target >= len(self.moves):
-            self._reset()
         self._playing = True
-        self._play_btn.config(text='⏸ 一時停止')
-        self._step()
+        self._play_btn.config(text='⏸  一時停止')
+        self._tick()
 
     def _stop(self):
         self._playing = False
-        self._play_btn.config(text='▶ 再生')
+        self._play_btn.config(text='▶  再生')
         if self._after_id:
-            self._win.after_cancel(self._after_id)
+            try:
+                self._win.after_cancel(self._after_id)
+            except Exception:
+                pass
             self._after_id = None
 
-    def _on_speed_change(self, e=None):
+    def _on_speed(self, e=None):
         sel = self._speed_var.get()
-        for label, val in self.SPEEDS:
-            if label == sel:
+        for lbl, val in self.SPEEDS:
+            if lbl == sel:
                 self._speed = val
-                break
 
-    def _step(self):
+    # ── アニメーション本体 ──────────────────────────────
+    def _tick(self):
         if not self._playing:
             return
         if self._target >= len(self.moves):
-            self._playing = False
-            self._play_btn.config(text='▶ 再生')
-            self._info_var.set('完了！')
-            self._progress['value'] = 100
+            self._stop()
+            self._info_var.set('✅ 完了！')
+            self._prog['value'] = 100
             return
 
-        move = self.moves[self._target]
-        tx, ty = move['x'], move['y']
-        is_rapid = move['rapid']
-        torch_on = move['torch']
+        move    = self.moves[self._target]
+        tx, ty  = move['x'], move['y']
+        rapid   = move['rapid']
+        torch   = move['torch']
 
-        mm_step = (self.MM_PER_STEP_RAP if is_rapid else self.MM_PER_STEP_CUT) * self._speed
+        mm_tick = (self.MM_PER_TICK_RAP if rapid
+                   else self.MM_PER_TICK_CUT) * self._speed
         dx = tx - self._cur_x
         dy = ty - self._cur_y
         dist = math.hypot(dx, dy)
 
-        if dist < 0.01:
-            # 到達
+        if dist < 0.5:
+            self._cur_x, self._cur_y = tx, ty
             self._target += 1
-            self._after_id = self._win.after(1, self._step)
+            self._after_id = self._win.after(1, self._tick)
             return
 
-        # 1ステップ分だけ進む
-        t = min(mm_step / dist, 1.0)
+        t  = min(mm_tick / dist, 1.0)
         nx = self._cur_x + dx * t
         ny = self._cur_y + dy * t
 
-        # トレース線を追加
-        color = '#ff8833' if is_rapid else '#44ff88'
-        self._ax.plot([self._cur_x, nx], [self._cur_y, ny],
-                      color=color,
-                      linewidth=0.9 if is_rapid else 1.4,
-                      linestyle='--' if is_rapid else '-',
-                      alpha=0.7, zorder=2)
+        # 線を描く
+        x1, y1 = self._to_canvas(self._cur_x, self._cur_y)
+        x2, y2 = self._to_canvas(nx, ny)
+        color  = '#ff8833' if rapid else '#44ff88'
+        dash   = (4, 4) if rapid else None
+        width  = 1 if rapid else 2
+        self._cv.create_line(x1, y1, x2, y2,
+                             fill=color, width=width,
+                             dash=dash, tags='trace')
 
         # トーチマーカー
-        if hasattr(self, '_torch_marker'):
-            try:
-                self._torch_marker.remove()
-            except Exception:
-                pass
-        marker_color = '#ffff00' if torch_on else '#ffffff'
-        self._torch_marker, = self._ax.plot(
-            [nx], [ny], 'o',
-            color=marker_color, markersize=8, zorder=5,
-            markeredgecolor='white', markeredgewidth=0.5)
-
-        # 火花エフェクト（切削中）
-        if torch_on and not is_rapid:
+        self._cv.delete('torch')
+        r = 6
+        tc = '#ffff00' if torch else '#ffffff'
+        self._cv.create_oval(x2-r, y2-r, x2+r, y2+r,
+                             fill=tc, outline='white',
+                             width=1, tags='torch')
+        # 切削中の火花
+        if torch and not rapid:
             import random
-            for _ in range(3):
-                sx = nx + random.uniform(-3, 3)
-                sy = ny + random.uniform(-3, 3)
-                spark, = self._ax.plot([nx, sx], [ny, sy],
-                                       color='#ffaa00', alpha=0.4,
-                                       linewidth=0.5, zorder=4)
-                self._win.after(80, lambda s=spark: self._remove_artist(s))
+            for _ in range(4):
+                ang = random.uniform(0, 2*math.pi)
+                ln  = random.uniform(4, 12)
+                sx  = x2 + math.cos(ang)*ln
+                sy  = y2 + math.sin(ang)*ln
+                sid = self._cv.create_line(
+                    x2, y2, sx, sy,
+                    fill=random.choice(['#ffaa00','#ffcc44','#ffffff']),
+                    width=1, tags='spark')
+                self._win.after(60, lambda i=sid: self._cv.delete(i))
 
         self._cur_x, self._cur_y = nx, ny
 
-        # 状態更新
+        # UI更新
         pct = int(self._target / len(self.moves) * 100)
-        self._progress['value'] = pct
+        self._prog['value'] = pct
         self._info_var.set(
-            f'移動 {self._target}/{len(self.moves)}  '
+            f'{self._target}/{len(self.moves)}  '
             f'X={nx:.1f}  Y={ny:.1f}')
-        if torch_on:
-            self._torch_var.set('🟡 トーチON (切断中)')
+        if torch:
+            self._torch_var.set('🔥 トーチON（切断中）')
             self._torch_lbl.config(fg='#ffcc00')
         else:
-            self._torch_var.set('🔴 トーチOFF')
+            self._torch_var.set('● トーチOFF')
             self._torch_lbl.config(fg='#ff4444')
 
-        self._mpl_canvas.draw_idle()
-
-        interval = max(1, int(self.STEP_MS / self._speed))
-        self._after_id = self._win.after(interval, self._step)
-
-    def _remove_artist(self, artist):
-        try:
-            artist.remove()
-            self._mpl_canvas.draw_idle()
-        except Exception:
-            pass
+        self._after_id = self._win.after(self.INTERVAL_MS, self._tick)
 
     def _on_close(self):
         self._stop()
