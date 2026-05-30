@@ -26,7 +26,7 @@ class PlasmaCamApp:
     def __init__(self, root):
         self.root = root
         self.root.title('Plasma CAM - GRBL')
-        self.root.geometry('1450x860')
+        self.root.geometry('1500x900')
 
         # dxf_entries: list of {'name', 'paths', 'offset_x', 'offset_y'}
         self.dxf_entries = []
@@ -97,8 +97,32 @@ class PlasmaCamApp:
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
-        main = ttk.Frame(self.root)
-        main.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 上段（メインエリア） / 下段（コンソール）に分割
+        outer = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
+        outer.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        main = ttk.Frame(outer)
+        outer.add(main, weight=5)
+
+        # コンソールパネル
+        con_frame = ttk.LabelFrame(outer, text='コンソール (GRBL通信ログ)')
+        outer.add(con_frame, weight=1)
+
+        self.console = tk.Text(con_frame, height=6, bg='#0e0e0e', fg='#00ff88',
+                               font=('Consolas', 9), wrap='none',
+                               insertbackground='white', state=tk.DISABLED)
+        con_sb = ttk.Scrollbar(con_frame, command=self.console.yview)
+        self.console.configure(yscrollcommand=con_sb.set)
+        con_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.console.pack(fill=tk.BOTH, expand=True)
+
+        btn_row = ttk.Frame(con_frame)
+        btn_row.pack(fill=tk.X)
+        ttk.Button(btn_row, text='クリア', command=self._clear_console, width=8).pack(side=tk.LEFT, padx=4, pady=2)
+        ttk.Button(btn_row, text='コマンド送信 ▶', command=self._send_manual_cmd).pack(side=tk.LEFT, pady=2)
+        self.manual_cmd = tk.StringVar()
+        ttk.Entry(btn_row, textvariable=self.manual_cmd, width=20).pack(side=tk.LEFT, padx=4, pady=2)
+        btn_row.bind('<Return>', lambda e: self._send_manual_cmd())
 
         cf = ttk.LabelFrame(main, text='マシンビュー / DXFプレビュー')
         cf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -116,15 +140,17 @@ class PlasmaCamApp:
         self._init_canvas()
         self._connect_canvas_events()
 
-        right = ttk.Frame(main, width=320)
+        right = ttk.Frame(main, width=340)
         right.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
         right.pack_propagate(False)
 
         nb = ttk.Notebook(right)
         nb.pack(fill=tk.BOTH, expand=True)
 
-        t1 = self._make_scroll_tab(nb, '  設定  ')
-        t2 = self._make_scroll_tab(nb, '  機械制御  ')
+        t1 = ttk.Frame(nb)
+        nb.add(t1, text='  設定  ')
+        t2 = ttk.Frame(nb)
+        nb.add(t2, text='  機械制御  ')
 
         self._build_settings_tab(t1)
         self._build_control_tab(t2)
@@ -368,120 +394,101 @@ class PlasmaCamApp:
 
     # ------------------------------------------------------------------ settings tab
     def _build_settings_tab(self, parent):
-        def add_entry(p, label, var):
-            ttk.Label(p, text=label).pack(anchor=tk.W, padx=6, pady=(4, 0))
-            ttk.Entry(p, textvariable=var).pack(fill=tk.X, padx=6, pady=(0, 2))
+        def g(p, label, var, r, c):
+            ttk.Label(p, text=label, font=('', 8)).grid(row=r, column=c*2,   sticky='e', padx=(4,2), pady=2)
+            ttk.Entry(p, textvariable=var, width=7).grid(row=r, column=c*2+1, sticky='w', padx=(0,6), pady=2)
 
+        # ---- プラズマ設定 (2列グリッド) ----
         sf = ttk.LabelFrame(parent, text='プラズマ設定')
-        sf.pack(fill=tk.X, padx=5, pady=(5, 5))
+        sf.pack(fill=tk.X, padx=5, pady=(4, 2))
 
-        self.feed_rate     = tk.StringVar(value='3000')
-        self.pierce_delay  = tk.StringVar(value='0.5')
-        self.kerf_width    = tk.StringVar(value='1.5')
+        self.feed_rate       = tk.StringVar(value='3000')
+        self.pierce_delay    = tk.StringVar(value='0.5')
+        self.kerf_width      = tk.StringVar(value='1.5')
         self.lead_in_length  = tk.StringVar(value='5.0')
         self.lead_out_length = tk.StringVar(value='3.0')
 
-        add_entry(sf, 'カット速度 (mm/min)', self.feed_rate)
-        add_entry(sf, 'ピアス遅延 (秒)', self.pierce_delay)
-        add_entry(sf, 'カーフ幅 (mm)', self.kerf_width)
-        add_entry(sf, 'リードイン長さ (mm)', self.lead_in_length)
+        g(sf, 'カット速度(mm/min)', self.feed_rate,       0, 0)
+        g(sf, 'ピアス遅延(秒)',     self.pierce_delay,    0, 1)
+        g(sf, 'カーフ幅(mm)',       self.kerf_width,      1, 0)
+        g(sf, 'リードイン(mm)',     self.lead_in_length,  1, 1)
+        g(sf, 'リードアウト(mm)',   self.lead_out_length, 2, 0)
 
-        ttk.Label(sf, text='リードイン種類').pack(anchor=tk.W, padx=6, pady=(4, 0))
+        li_f = ttk.Frame(sf)
+        li_f.grid(row=2, column=2, columnspan=2, sticky='w', padx=4)
         self.lead_in_type = tk.StringVar(value='line')
-        ttk.Radiobutton(sf, text='直線', variable=self.lead_in_type, value='line').pack(anchor=tk.W, padx=18)
-        ttk.Radiobutton(sf, text='円弧', variable=self.lead_in_type, value='arc').pack(anchor=tk.W, padx=18)
+        ttk.Radiobutton(li_f, text='直線', variable=self.lead_in_type, value='line').pack(side=tk.LEFT)
+        ttk.Radiobutton(li_f, text='円弧', variable=self.lead_in_type, value='arc').pack(side=tk.LEFT)
 
-        add_entry(sf, 'リードアウト長さ (mm)', self.lead_out_length)
-
-        # ---- File list ----
-        ff = ttk.LabelFrame(parent, text='読み込みファイル')
-        ff.pack(fill=tk.X, padx=5, pady=(0, 5))
+        # ---- ファイルリスト ----
+        ff = ttk.LabelFrame(parent, text='DXFファイル')
+        ff.pack(fill=tk.X, padx=5, pady=(2, 2))
 
         list_frame = ttk.Frame(ff)
-        list_frame.pack(fill=tk.X, padx=5, pady=(4, 0))
-
-        self.file_listbox = tk.Listbox(list_frame, height=4, selectmode=tk.SINGLE,
-                                       font=('', 9))
-        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL,
-                           command=self.file_listbox.yview)
+        list_frame.pack(fill=tk.X, padx=5, pady=(3, 0))
+        self.file_listbox = tk.Listbox(list_frame, height=3, selectmode=tk.SINGLE, font=('', 9))
+        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.file_listbox.yview)
         self.file_listbox.config(yscrollcommand=sb.set)
         self.file_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.file_listbox.bind('<<ListboxSelect>>', self._on_file_select)
 
         btn_row = ttk.Frame(ff)
-        btn_row.pack(fill=tk.X, padx=5, pady=4)
-        ttk.Button(btn_row, text='DXFを追加',
-                   command=self.open_dxf).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        ttk.Button(btn_row, text='選択を削除',
-                   command=self._delete_selected_file).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        btn_row.pack(fill=tk.X, padx=5, pady=3)
+        ttk.Button(btn_row, text='DXF追加', command=self.open_dxf).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        ttk.Button(btn_row, text='削除',    command=self._delete_selected_file).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
 
-        # ---- Info ----
-        info = ttk.LabelFrame(parent, text='ファイル情報')
-        info.pack(fill=tk.X, padx=5, pady=(0, 5))
-        self.info_label = ttk.Label(info, text='ファイル未選択',
-                                    wraplength=260, justify=tk.LEFT)
-        self.info_label.pack(padx=5, pady=5)
+        self.info_label = ttk.Label(ff, text='未選択', font=('', 8))
+        self.info_label.pack(padx=5, pady=(0,3))
 
-        ttk.Button(parent, text='Gコードを保存',
-                   command=self.save_gcode).pack(fill=tk.X, padx=5, pady=2)
+        ttk.Button(parent, text='💾 Gコードを保存', command=self.save_gcode).pack(fill=tk.X, padx=5, pady=2)
 
-        # ---- DXF offset (per selected file) ----
-        of = ttk.LabelFrame(parent, text='選択ファイルのオフセット (mm)')
-        of.pack(fill=tk.X, padx=5, pady=(8, 5))
+        # ---- オフセット ----
+        of = ttk.LabelFrame(parent, text='オフセット (mm)')
+        of.pack(fill=tk.X, padx=5, pady=(2, 2))
 
         self.offset_x = tk.StringVar(value='0')
         self.offset_y = tk.StringVar(value='0')
 
         ox_row = ttk.Frame(of)
-        ox_row.pack(fill=tk.X, padx=6, pady=(4, 0))
-        ttk.Label(ox_row, text='X :').pack(side=tk.LEFT)
-        ttk.Entry(ox_row, textvariable=self.offset_x, width=8).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ox_row, text='-10', width=4,
-                   command=lambda: self._change_offset('x', -10)).pack(side=tk.LEFT, padx=1)
-        ttk.Button(ox_row, text='+10', width=4,
-                   command=lambda: self._change_offset('x', 10)).pack(side=tk.LEFT, padx=1)
+        ox_row.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Label(ox_row, text='X:').pack(side=tk.LEFT)
+        ttk.Entry(ox_row, textvariable=self.offset_x, width=7).pack(side=tk.LEFT, padx=3)
+        ttk.Button(ox_row, text='-10', width=4, command=lambda: self._change_offset('x',-10)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(ox_row, text='+10', width=4, command=lambda: self._change_offset('x', 10)).pack(side=tk.LEFT, padx=1)
 
         oy_row = ttk.Frame(of)
-        oy_row.pack(fill=tk.X, padx=6, pady=(2, 4))
-        ttk.Label(oy_row, text='Y :').pack(side=tk.LEFT)
-        ttk.Entry(oy_row, textvariable=self.offset_y, width=8).pack(side=tk.LEFT, padx=4)
-        ttk.Button(oy_row, text='-10', width=4,
-                   command=lambda: self._change_offset('y', -10)).pack(side=tk.LEFT, padx=1)
-        ttk.Button(oy_row, text='+10', width=4,
-                   command=lambda: self._change_offset('y', 10)).pack(side=tk.LEFT, padx=1)
+        oy_row.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Label(oy_row, text='Y:').pack(side=tk.LEFT)
+        ttk.Entry(oy_row, textvariable=self.offset_y, width=7).pack(side=tk.LEFT, padx=3)
+        ttk.Button(oy_row, text='-10', width=4, command=lambda: self._change_offset('y',-10)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(oy_row, text='+10', width=4, command=lambda: self._change_offset('y', 10)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(of, text='反映', command=self._apply_offset).pack(fill=tk.X, padx=5, pady=(0,3))
 
-        ttk.Button(of, text='プレビューに反映',
-                   command=self._apply_offset).pack(fill=tk.X, padx=5, pady=(0, 4))
-
-        # ---- serial ----
+        # ---- シリアル接続 ----
         cf = ttk.LabelFrame(parent, text='シリアル接続 (GRBL)')
-        cf.pack(fill=tk.X, padx=5, pady=(8, 5))
+        cf.pack(fill=tk.X, padx=5, pady=(2, 4))
 
         row1 = ttk.Frame(cf)
-        row1.pack(fill=tk.X, padx=5, pady=(4, 0))
-        ttk.Label(row1, text='COMポート:').pack(side=tk.LEFT)
+        row1.pack(fill=tk.X, padx=5, pady=(3,0))
+        ttk.Label(row1, text='COM:').pack(side=tk.LEFT)
         self.port_var = tk.StringVar()
-        self.port_cb = ttk.Combobox(row1, textvariable=self.port_var, width=9)
-        self.port_cb.pack(side=tk.LEFT, padx=4)
+        self.port_cb = ttk.Combobox(row1, textvariable=self.port_var, width=8)
+        self.port_cb.pack(side=tk.LEFT, padx=3)
+        ttk.Label(row1, text='Baud:').pack(side=tk.LEFT, padx=(4,0))
+        self.baud_var = tk.StringVar(value='115200')
+        ttk.Combobox(row1, textvariable=self.baud_var, values=['9600','38400','115200'], width=8).pack(side=tk.LEFT, padx=3)
         ttk.Button(row1, text='更新', command=self._refresh_ports, width=4).pack(side=tk.LEFT)
 
         row2 = ttk.Frame(cf)
-        row2.pack(fill=tk.X, padx=5, pady=(2, 4))
-        ttk.Label(row2, text='ボーレート:').pack(side=tk.LEFT)
-        self.baud_var = tk.StringVar(value='115200')
-        ttk.Combobox(row2, textvariable=self.baud_var,
-                     values=['9600', '38400', '115200'], width=9).pack(side=tk.LEFT, padx=4)
+        row2.pack(fill=tk.X, padx=5, pady=(2,3))
+        self.connect_btn = ttk.Button(row2, text='接続', command=self._toggle_connect)
+        self.connect_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        self.offline_btn = ttk.Button(row2, text='オフライン', command=self._toggle_offline)
+        self.offline_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
 
-        self.connect_btn = ttk.Button(cf, text='接続', command=self._toggle_connect)
-        self.connect_btn.pack(fill=tk.X, padx=5, pady=2)
-        self.conn_status = ttk.Label(cf, text='未接続', foreground='gray')
-        self.conn_status.pack(padx=5, pady=(0, 4))
-
-        # オフラインモードボタン
-        self.offline_btn = ttk.Button(cf, text='オフラインモードで使用',
-                                      command=self._toggle_offline)
-        self.offline_btn.pack(fill=tk.X, padx=5, pady=(0, 5))
+        self.conn_status = ttk.Label(cf, text='未接続', foreground='gray', font=('',8))
+        self.conn_status.pack(padx=5, pady=(0,3))
 
         self._refresh_ports()
 
@@ -504,6 +511,10 @@ class PlasmaCamApp:
         self.pos_y_label = ttk.Label(grid, text='    0.000 mm',
                                      font=font_value, foreground='#1565C0')
         self.pos_y_label.grid(row=1, column=1, sticky=tk.W)
+
+        self.grbl_state_label = ttk.Label(grid, text='状態: --',
+                                          font=('', 10), foreground='gray')
+        self.grbl_state_label.grid(row=2, column=0, columnspan=2, pady=(6, 0))
 
         step_f = ttk.LabelFrame(parent, text='移動量 (mm)')
         step_f.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -570,6 +581,27 @@ class PlasmaCamApp:
         self.stop_btn = ttk.Button(sf2, text='緊急停止  (M5 + !)',
                                    command=self._emergency_stop, state=tk.DISABLED)
         self.stop_btn.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+        # ---- GRBLコンソール ----
+        tf = ttk.LabelFrame(parent, text='GRBLコンソール')
+        tf.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+
+        con_frame = ttk.Frame(tf)
+        con_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self.terminal = tk.Text(con_frame, height=6, font=('Courier', 8),
+                                bg='#1C1C1C', fg='#AAFFAA',
+                                state=tk.DISABLED, wrap=tk.WORD)
+        tsb = ttk.Scrollbar(con_frame, command=self.terminal.yview)
+        self.terminal.config(yscrollcommand=tsb.set)
+        tsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.terminal.pack(fill=tk.BOTH, expand=True)
+        self.terminal.tag_config('send',  foreground='#60AAFF')
+        self.terminal.tag_config('error', foreground='#FF6060')
+        self.terminal.tag_config('alarm', foreground='#FF4040',
+                                 font=('Courier', 8, 'bold'))
+        self.terminal.tag_config('ok',    foreground='#88FF88')
+        ttk.Button(tf, text='クリア',
+                   command=self._clear_terminal).pack(anchor='e', padx=5, pady=(0, 3))
 
     # ------------------------------------------------------------------ file list helpers
     def _selected_entry_idx(self):
@@ -716,11 +748,13 @@ class PlasmaCamApp:
         self.conn_status.config(text=status_text, foreground='green')
         self.send_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.NORMAL)
+        self._log(f'✅ {status_text}', 'info')
 
     def _on_connect_fail(self, err_msg):
         self.ser = None
         self.connect_btn.config(text='接続', state=tk.NORMAL)
         self.conn_status.config(text='未接続', foreground='gray')
+        self._log(f'❌ 接続失敗: {err_msg}', 'error')
         messagebox.showerror('接続エラー', err_msg)
 
     def _disconnect(self):
@@ -739,6 +773,7 @@ class PlasmaCamApp:
             return
         with self.serial_lock:
             self.ser.write((cmd.strip() + '\n').encode())
+        self._log_terminal(f'>>> {cmd.strip()}', 'send')
 
     def _send_realtime(self, byte: bytes):
         if not self.ser or not self.ser.is_open:
@@ -746,16 +781,91 @@ class PlasmaCamApp:
         with self.serial_lock:
             self.ser.write(byte)
 
+    # ------------------------------------------------------------------ terminal log
+    def _log_terminal(self, text, tag=None):
+        def _do():
+            if not hasattr(self, 'terminal'):
+                return
+            self.terminal.config(state=tk.NORMAL)
+            if tag:
+                self.terminal.insert(tk.END, text + '\n', tag)
+            else:
+                self.terminal.insert(tk.END, text + '\n')
+            self.terminal.see(tk.END)
+            self.terminal.config(state=tk.DISABLED)
+        self.root.after(0, _do)
+
+    def _clear_terminal(self):
+        if hasattr(self, 'terminal'):
+            self.terminal.config(state=tk.NORMAL)
+            self.terminal.delete('1.0', tk.END)
+            self.terminal.config(state=tk.DISABLED)
+
+    def _handle_grbl_line(self, line):
+        """GRBLからの1行を解析してUI更新・ログ出力する（任意スレッドから呼び出し可）。"""
+        if line.startswith('<') and line.endswith('>'):
+            self._parse_position(line)
+            self._parse_grbl_state(line)
+        elif line.lower().startswith('ok'):
+            self._log_terminal('  ok', 'ok')
+        elif line.lower().startswith('error'):
+            code = line.split(':')[1].strip() if ':' in line else '?'
+            desc = self._grbl_error_desc(code)
+            self._log_terminal(f'  ⚠ {line}  ({desc})', 'error')
+        elif 'ALARM' in line.upper():
+            self._log_terminal(f'  🔴 {line}', 'alarm')
+        elif line:
+            self._log_terminal(f'  {line}')
+
+    def _parse_grbl_state(self, resp):
+        m = re.match(r'<([^:|>]+)', resp)
+        if not m:
+            return
+        state = m.group(1)
+        state_map = {
+            'Idle':  ('Idle (待機中)',          'green'),
+            'Run':   ('Run (実行中)',            '#2196F3'),
+            'Hold':  ('Hold (一時停止)',         '#FF9800'),
+            'Alarm': ('⚠ ALARM - アラーム解除を押してください', 'red'),
+            'Door':  ('Door (ドア開)',           '#FF5722'),
+            'Home':  ('Home (ホーミング中)',      '#9C27B0'),
+            'Jog':   ('Jog (移動中)',            '#4CAF50'),
+        }
+        text, color = state_map.get(state, (state, 'gray'))
+        self.root.after(0, lambda t=text, c=color:
+                        self.grbl_state_label.config(text=f'状態: {t}', foreground=c))
+
+    def _grbl_error_desc(self, code):
+        descs = {
+            '1':  'Gコードに無効文字',
+            '2':  '行頭文字が無効',
+            '5':  'ホームサイクルが必要',
+            '9':  'アラームロック中 → $X で解除',
+            '20': 'サポート外コマンド',
+            '22': 'ホームスイッチ未設定',
+            '24': 'コマンド再送が必要',
+        }
+        return descs.get(str(code), f'コード{code}')
+
     # ------------------------------------------------------------------ position polling
     def _poll_thread(self):
         while self.polling and self.ser and self.ser.is_open:
             if not self.streaming:
                 try:
                     with self.serial_lock:
+                        # バッファに溜まった未読データを先に消化
+                        pending = self.ser.in_waiting
+                        if pending > 0:
+                            raw = self.ser.read(pending).decode('utf-8', errors='ignore')
+                            for line in raw.splitlines():
+                                line = line.strip()
+                                if line:
+                                    self._handle_grbl_line(line)
+                        # 状態ポーリング
                         self.ser.write(b'?')
                         resp = self.ser.readline().decode('utf-8', errors='ignore').strip()
-                    if 'Pos:' in resp:
-                        self._parse_position(resp)
+                    if resp:
+                        self._handle_grbl_line(resp)
                 except Exception:
                     pass
             time.sleep(0.5)
@@ -766,6 +876,8 @@ class PlasmaCamApp:
             x, y = float(m.group(1)), float(m.group(2))
             self.torch_x, self.torch_y = x, y
             self.root.after(0, lambda: self._update_torch_display(x, y))
+        if resp and not resp.startswith('<'):
+            self.root.after(0, lambda r=resp: self._log(f'<<< {r}', 'recv'))
 
     # ------------------------------------------------------------------ helpers
     def _change_step(self, delta):
@@ -804,14 +916,13 @@ class PlasmaCamApp:
             messagebox.showwarning('警告', '先に接続してください')
             return
         step = float(self.jog_step.get())
-        speed = self.jog_speed.get()
-        parts = ['$J=G21G91']
+        speed = int(float(self.jog_speed.get()))
+        axis = ''
         if dx:
-            parts.append(f'X{dx * step:.3f}')
+            axis += f' X{dx * step:.3f}'
         if dy:
-            parts.append(f'Y{dy * step:.3f}')
-        parts.append(f'F{speed}')
-        self._send_serial(''.join(parts))
+            axis += f' Y{dy * step:.3f}'
+        self._send_serial(f'$J=G21 G91{axis} F{speed}')
 
     def _goto_origin(self):
         if not self.ser or not self.ser.is_open:
@@ -936,10 +1047,14 @@ class PlasmaCamApp:
                     self.root.after(0, lambda v=pct: self.progress.configure(value=v))
 
                 elif resp.lower().startswith('error'):
-                    # エラー発生行を特定
                     err_line = lines[ack_count] if ack_count < total else '?'
                     error_msg = f'コマンド: {err_line}\n応答: {resp}'
+                    self.root.after(0, lambda r=resp, l=err_line:
+                                    self._log(f'❌ {l}  →  {r}', 'error'))
                     break
+
+                elif resp:
+                    self.root.after(0, lambda r=resp: self._log(f'<<< {r}', 'recv'))
 
         except Exception as e:
             error_msg = str(e)
@@ -1010,6 +1125,35 @@ class PlasmaCamApp:
             messagebox.showinfo('完了', f'Gコードを保存しました:\n{filename}')
         except Exception as e:
             messagebox.showerror('エラー', f'保存に失敗しました:\n{e}')
+
+    # ------------------------------------------------------------------ console
+    def _log(self, text, tag='normal'):
+        """コンソールにログを追記"""
+        self.console.configure(state=tk.NORMAL)
+        colors = {'send': '#88ccff', 'recv': '#00ff88', 'error': '#ff4444', 'info': '#ffcc00'}
+        self.console.insert(tk.END, text + '\n', tag)
+        self.console.tag_config('send',  foreground=colors['send'])
+        self.console.tag_config('recv',  foreground=colors['recv'])
+        self.console.tag_config('error', foreground=colors['error'])
+        self.console.tag_config('info',  foreground=colors['info'])
+        self.console.configure(state=tk.DISABLED)
+        self.console.see(tk.END)
+
+    def _clear_console(self):
+        self.console.configure(state=tk.NORMAL)
+        self.console.delete('1.0', tk.END)
+        self.console.configure(state=tk.DISABLED)
+
+    def _send_manual_cmd(self):
+        cmd = self.manual_cmd.get().strip()
+        if not cmd:
+            return
+        if not self.ser or not self.ser.is_open:
+            self._log('未接続です', 'error')
+            return
+        self._log(f'>>> {cmd}', 'send')
+        self._send_serial(cmd)
+        self.manual_cmd.set('')
 
     def _on_close(self):
         self.streaming = False
