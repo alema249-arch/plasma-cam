@@ -97,14 +97,25 @@ class PlasmaCamApp:
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
-        # コンソールを下部固定、上部をメインエリアに
-        con_frame = ttk.LabelFrame(self.root, text='コンソール (GRBL通信ログ)',
-                                   height=160)
-        con_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(0, 5))
-        con_frame.pack_propagate(False)  # 高さ固定
+        # 上下ペイン（サッシをドラッグしてリサイズ可能）
+        outer = tk.PanedWindow(self.root, orient=tk.VERTICAL,
+                               sashwidth=6, sashrelief='raised',
+                               sashpad=2, bg='#888')
+        outer.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        main = ttk.Frame(self.root)
-        main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
+        main = ttk.Frame(outer)
+        outer.add(main, minsize=300, stretch='always')
+
+        con_frame = ttk.LabelFrame(outer, text='📟 コンソール (GRBL通信ログ) ← ここをドラッグでリサイズ')
+        outer.add(con_frame, minsize=100, stretch='never')
+
+        # 初期サイズ：起動後にサッシ位置を設定
+        def _set_sash(e=None):
+            h = self.root.winfo_height()
+            if h > 400:
+                outer.sash_place(0, 0, h - 200)
+                self.root.unbind('<Map>')
+        self.root.bind('<Map>', _set_sash)
 
         self.console = tk.Text(con_frame, height=6, bg='#0e0e0e', fg='#00ff88',
                                font=('Consolas', 9), wrap='none',
