@@ -116,13 +116,26 @@ class PlasmaCamApp:
         con_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.console.pack(fill=tk.BOTH, expand=True)
 
-        btn_row = ttk.Frame(con_frame)
-        btn_row.pack(fill=tk.X)
-        ttk.Button(btn_row, text='クリア', command=self._clear_console, width=8).pack(side=tk.LEFT, padx=4, pady=2)
-        ttk.Button(btn_row, text='コマンド送信 ▶', command=self._send_manual_cmd).pack(side=tk.LEFT, pady=2)
+        input_row = ttk.Frame(con_frame)
+        input_row.pack(fill=tk.X, padx=4, pady=(2, 4))
+
+        ttk.Label(input_row, text='>>>', font=('Consolas', 10, 'bold'),
+                  foreground='#88ccff').pack(side=tk.LEFT, padx=(2, 4))
         self.manual_cmd = tk.StringVar()
-        ttk.Entry(btn_row, textvariable=self.manual_cmd, width=20).pack(side=tk.LEFT, padx=4, pady=2)
-        btn_row.bind('<Return>', lambda e: self._send_manual_cmd())
+        cmd_entry = ttk.Entry(input_row, textvariable=self.manual_cmd,
+                              font=('Consolas', 10), width=30)
+        cmd_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        cmd_entry.bind('<Return>', lambda e: self._send_manual_cmd())
+        cmd_entry.bind('<Up>',     lambda e: self._cmd_history(-1))
+        cmd_entry.bind('<Down>',   lambda e: self._cmd_history(1))
+
+        ttk.Button(input_row, text='送信', command=self._send_manual_cmd,
+                   width=6).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(input_row, text='クリア', command=self._clear_console,
+                   width=6).pack(side=tk.LEFT)
+
+        self._cmd_hist = []   # コマンド履歴
+        self._cmd_hist_idx = 0
 
         cf = ttk.LabelFrame(main, text='マシンビュー / DXFプレビュー')
         cf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1148,12 +1161,24 @@ class PlasmaCamApp:
         cmd = self.manual_cmd.get().strip()
         if not cmd:
             return
-        if not self.ser or not self.ser.is_open:
-            self._log('未接続です', 'error')
-            return
-        self._log(f'>>> {cmd}', 'send')
-        self._send_serial(cmd)
+        # 履歴に追加
+        if not self._cmd_hist or self._cmd_hist[-1] != cmd:
+            self._cmd_hist.append(cmd)
+        self._cmd_hist_idx = len(self._cmd_hist)
         self.manual_cmd.set('')
+        self._log(f'>>> {cmd}', 'send')
+        if not self.ser or not self.ser.is_open:
+            self._log('  ⚠ 未接続', 'error')
+            return
+        self._send_serial(cmd)
+
+    def _cmd_history(self, direction):
+        """↑↓キーでコマンド履歴を辿る"""
+        if not self._cmd_hist:
+            return
+        self._cmd_hist_idx = max(0, min(len(self._cmd_hist) - 1,
+                                        self._cmd_hist_idx + direction))
+        self.manual_cmd.set(self._cmd_hist[self._cmd_hist_idx])
 
     def _on_close(self):
         self.streaming = False
