@@ -447,13 +447,16 @@ class PlasmaCamApp:
         )
         self.canvas_widget.draw()
 
-    def _update_torch_display(self, x, y):
+    def _update_torch_display(self, x, y, z=None):
         self.pos_x_label.config(text=f'{x:9.3f} mm')
         self.pos_y_label.config(text=f'{y:9.3f} mm')
+        if z is not None and hasattr(self, 'pos_z_label'):
+            self.pos_z_label.config(text=f'{z:9.3f} mm')
         self.torch_cross.set_data([x], [y])
         self.torch_dot.set_data([x], [y])
+        z_str = f'  Z={z:.3f}' if z is not None else ''
         self.ax.set_title(
-            f'トーチ位置: X={x:.3f}  Y={y:.3f} mm  |  '
+            f'トーチ位置: X={x:.3f}  Y={y:.3f}{z_str} mm  |  '
             f'マシン: {MACHINE_W} × {MACHINE_H} mm'
         )
         self.canvas_widget.draw_idle()
@@ -578,9 +581,14 @@ class PlasmaCamApp:
                                      font=font_value, foreground='#1565C0')
         self.pos_y_label.grid(row=1, column=1, sticky=tk.W)
 
+        ttk.Label(grid, text='Z :', font=font_label).grid(row=2, column=0, sticky=tk.E, padx=4)
+        self.pos_z_label = ttk.Label(grid, text='    0.000 mm',
+                                     font=font_value, foreground='#00897B')
+        self.pos_z_label.grid(row=2, column=1, sticky=tk.W)
+
         self.grbl_state_label = ttk.Label(grid, text='状態: --',
                                           font=('', 10), foreground='gray')
-        self.grbl_state_label.grid(row=2, column=0, columnspan=2, pady=(6, 0))
+        self.grbl_state_label.grid(row=3, column=0, columnspan=2, pady=(6, 0))
 
         step_f = ttk.LabelFrame(parent, text='移動量 (mm)')
         step_f.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -608,16 +616,27 @@ class PlasmaCamApp:
         btn_grid.pack(pady=8)
         W = 5
 
+        # XY ジョグ
         ttk.Button(btn_grid, text='Y+', width=W,
-                   command=lambda: self._jog(0, 1)).grid(row=0, column=1, padx=3, pady=3)
+                   command=lambda: self._jog(0, 1, 0)).grid(row=0, column=1, padx=3, pady=3)
         ttk.Button(btn_grid, text='X-', width=W,
-                   command=lambda: self._jog(-1, 0)).grid(row=1, column=0, padx=3, pady=3)
+                   command=lambda: self._jog(-1, 0, 0)).grid(row=1, column=0, padx=3, pady=3)
         ttk.Button(btn_grid, text='⌂\n原点へ', width=W,
                    command=self._goto_origin).grid(row=1, column=1, padx=3, pady=3)
         ttk.Button(btn_grid, text='X+', width=W,
-                   command=lambda: self._jog(1, 0)).grid(row=1, column=2, padx=3, pady=3)
+                   command=lambda: self._jog(1, 0, 0)).grid(row=1, column=2, padx=3, pady=3)
         ttk.Button(btn_grid, text='Y-', width=W,
-                   command=lambda: self._jog(0, -1)).grid(row=2, column=1, padx=3, pady=3)
+                   command=lambda: self._jog(0, -1, 0)).grid(row=2, column=1, padx=3, pady=3)
+
+        # Z軸ジョグ（右側に縦並び）
+        ttk.Separator(btn_grid, orient=tk.VERTICAL).grid(
+            row=0, column=3, rowspan=3, sticky='ns', padx=6)
+        ttk.Label(btn_grid, text='Z', font=('', 9, 'bold'),
+                  foreground='#00897B').grid(row=0, column=4, padx=2)
+        ttk.Button(btn_grid, text='Z+', width=W,
+                   command=lambda: self._jog(0, 0, 1)).grid(row=1, column=4, padx=3, pady=3)
+        ttk.Button(btn_grid, text='Z-', width=W,
+                   command=lambda: self._jog(0, 0, -1)).grid(row=2, column=4, padx=3, pady=3)
 
         mf = ttk.LabelFrame(parent, text='マシン制御')
         mf.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -910,11 +929,12 @@ class PlasmaCamApp:
             time.sleep(0.5)
 
     def _parse_position(self, resp):
-        m = re.search(r'[MW]Pos:([-\d.]+),([-\d.]+)', resp)
+        m = re.search(r'[MW]Pos:([-\d.]+),([-\d.]+),?([-\d.]*)', resp)
         if m:
             x, y = float(m.group(1)), float(m.group(2))
+            z = float(m.group(3)) if m.group(3) else None
             self.torch_x, self.torch_y = x, y
-            self.root.after(0, lambda: self._update_torch_display(x, y))
+            self.root.after(0, lambda: self._update_torch_display(x, y, z))
         if resp and not resp.startswith('<'):
             self.root.after(0, lambda r=resp: self._log(f'<<< {r}', 'recv'))
 
@@ -950,7 +970,7 @@ class PlasmaCamApp:
         self._draw_paths()
 
     # ------------------------------------------------------------------ jog / machine
-    def _jog(self, dx, dy):
+    def _jog(self, dx, dy, dz=0):
         if not self.ser or not self.ser.is_open:
             messagebox.showwarning('警告', '先に接続してください')
             return
@@ -961,6 +981,10 @@ class PlasmaCamApp:
             axis += f' X{dx * step:.3f}'
         if dy:
             axis += f' Y{dy * step:.3f}'
+        if dz:
+            axis += f' Z{dz * step:.3f}'
+        if not axis:
+            return
         self._send_serial(f'$J=G21 G91{axis} F{speed}')
 
     def _goto_origin(self):
