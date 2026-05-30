@@ -27,6 +27,9 @@ class PlasmaCamApp:
         self.root = root
         self.root.title('Plasma CAM - GRBL')
         self.root.geometry('1500x900')
+        self._layout_file = os.path.join(
+            os.path.dirname(__file__), 'layouts.json')
+        self._layouts = self._load_layout_file()
 
         # dxf_entries: list of {'name', 'paths', 'offset_x', 'offset_y'}
         self.dxf_entries = []
@@ -93,6 +96,16 @@ class PlasmaCamApp:
         fm.add_separator()
         fm.add_command(label='終了', command=self._on_close)
         mb.add_cascade(label='ファイル', menu=fm)
+
+        # レイアウトメニュー
+        lm = tk.Menu(mb, tearoff=0)
+        lm.add_command(label='現在のレイアウトを保存...', command=self._save_layout_as)
+        lm.add_command(label='デフォルトに戻す',          command=self._apply_default_layout)
+        lm.add_separator()
+        self._layout_menu = lm
+        self._rebuild_layout_menu()
+        mb.add_cascade(label='レイアウト', menu=lm)
+
         self.root.config(menu=mb)
 
     # ------------------------------------------------------------------ UI
@@ -187,17 +200,22 @@ class PlasmaCamApp:
         con_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.console.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        # 初期サッシ位置を起動後に設定
+        # PanedWindow への参照を保持（レイアウト保存用）
+        self._h_pane = h_pane
+        self._col4   = col4
+
+        # 起動時にレイアウトを適用
         def _init_sash(e=None):
             w = self.root.winfo_width()
             h = self.root.winfo_height()
-            if w > 600:
-                # 列1:残り, 列2:220, 列3:220, 列4:240
-                h_pane.sash_place(0, w - 220 - 220 - 240, 0)
-                h_pane.sash_place(1, w - 220 - 240, 0)
-                h_pane.sash_place(2, w - 240, 0)
-                col4.sash_place(0, 0, int(h * 0.35))
-                self.root.unbind('<Map>')
+            if w < 600:
+                return
+            saved = self._layouts.get('__last__')
+            if saved:
+                self._apply_layout_dict(saved)
+            else:
+                self._apply_default_layout()
+            self.root.unbind('<Map>')
         self.root.bind('<Map>', _init_sash)
 
         self._build_settings_tab(t1)
@@ -1219,11 +1237,116 @@ class PlasmaCamApp:
                                         self._cmd_hist_idx + direction))
         self.manual_cmd.set(self._cmd_hist[self._cmd_hist_idx])
 
+    # ------------------------------------------------------------------ layout
+    DEFAULT_LAYOUT = {
+        'geometry': '1500x900',
+        'h_sash': [820, 1040, 1260],   # h_pane の sash x 座標
+        'v_sash': 315,                  # col4 の sash y 座標
+    }
+
+    def _load_layout_file(self):
+        import json
+        if os.path.exists(self._layout_file):
+            try:
+                with open(self._layout_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_layout_file(self):
+        import json
+        with open(self._layout_file, 'w', encoding='utf-8') as f:
+            json.dump(self._layouts, f, ensure_ascii=False, indent=2)
+
+    def _current_layout_dict(self):
+        """現在のウィンドウサイズ・サッシ位置を辞書で返す"""
+        geo = self.root.geometry()
+        h_sash = []
+        try:
+            for i in range(3):
+                x, _ = self._h_pane.sash_coord(i)
+                h_sash.append(x)
+        except Exception:
+            h_sash = self.DEFAULT_LAYOUT['h_sash']
+        try:
+            _, y = self._col4.sash_coord(0)
+            v_sash = y
+        except Exception:
+            v_sash = self.DEFAULT_LAYOUT['v_sash']
+        return {'geometry': geo, 'h_sash': h_sash, 'v_sash': v_sash}
+
+    def _apply_layout_dict(self, d):
+        """辞書からレイアウトを適用する"""
+        try:
+            self.root.geometry(d.get('geometry', '1500x900'))
+            self.root.update_idletasks()
+            for i, x in enumerate(d.get('h_sash', [])):
+                self._h_pane.sash_place(i, x, 0)
+            self._col4.sash_place(0, 0, d.get('v_sash', 315))
+        except Exception as e:
+            print('レイアウト適用エラー:', e)
+
+    def _apply_default_layout(self):
+        self._apply_layout_dict(self.DEFAULT_LAYOUT)
+
+    def _save_layout_as(self):
+        """名前を付けてレイアウトを保存"""
+        from tkinter.simpledialog import askstring
+        name = askstring('レイアウト保存', 'レイアウト名を入力してください:',
+                         parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self._layouts[name] = self._current_layout_dict()
+        self._layouts['__last__'] = self._current_layout_dict()
+        self._save_layout_file()
+        self._rebuild_layout_menu()
+        messagebox.showinfo('保存完了', f'レイアウト「{name}」を保存しました。')
+
+    def _load_layout(self, name):
+        d = self._layouts.get(name)
+        if d:
+            self._apply_layout_dict(d)
+            self._layouts['__last__'] = d
+            self._save_layout_file()
+
+    def _delete_layout(self, name):
+        if name in self._layouts:
+            if messagebox.askyesno('確認', f'「{name}」を削除しますか？'):
+                del self._layouts[name]
+                self._save_layout_file()
+                self._rebuild_layout_menu()
+
+    def _rebuild_layout_menu(self):
+        """保存済みレイアウト一覧をメニューに反映"""
+        # 固定メニュー2項目 + separator の後をクリア
+        end = self._layout_menu.index('end')
+        if end is not None and end >= 3:
+            for _ in range(end - 2):
+                self._layout_menu.delete(3)
+
+        saved = [k for k in self._layouts if not k.startswith('__')]
+        if saved:
+            for name in saved:
+                sub = tk.Menu(self._layout_menu, tearoff=0)
+                sub.add_command(label='適用',
+                                command=lambda n=name: self._load_layout(n))
+                sub.add_command(label='削除',
+                                command=lambda n=name: self._delete_layout(n))
+                self._layout_menu.add_cascade(label=f'  {name}', menu=sub)
+
     def _on_close(self):
         self.streaming = False
         self.polling = False
         if self.ser and self.ser.is_open:
             self.ser.close()
+        # 終了時にレイアウトを自動保存
+        try:
+            self._layouts['__last__'] = self._current_layout_dict()
+            self._save_layout_file()
+        except Exception:
+            pass
         self.root.destroy()
 
 
