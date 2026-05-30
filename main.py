@@ -648,26 +648,7 @@ class PlasmaCamApp:
                                    command=self._emergency_stop, state=tk.DISABLED)
         self.stop_btn.pack(fill=tk.X, padx=5, pady=(0, 5))
 
-        # ---- GRBLコンソール ----
-        tf = ttk.LabelFrame(parent, text='GRBLコンソール')
-        tf.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
-
-        con_frame = ttk.Frame(tf)
-        con_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
-        self.terminal = tk.Text(con_frame, height=6, font=('Courier', 8),
-                                bg='#1C1C1C', fg='#AAFFAA',
-                                state=tk.DISABLED, wrap=tk.WORD)
-        tsb = ttk.Scrollbar(con_frame, command=self.terminal.yview)
-        self.terminal.config(yscrollcommand=tsb.set)
-        tsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.terminal.pack(fill=tk.BOTH, expand=True)
-        self.terminal.tag_config('send',  foreground='#60AAFF')
-        self.terminal.tag_config('error', foreground='#FF6060')
-        self.terminal.tag_config('alarm', foreground='#FF4040',
-                                 font=('Courier', 8, 'bold'))
-        self.terminal.tag_config('ok',    foreground='#88FF88')
-        ttk.Button(tf, text='クリア',
-                   command=self._clear_terminal).pack(anchor='e', padx=5, pady=(0, 3))
+        # GRBLコンソールは右パネルの「コンソール表示」に統合済み
 
     # ------------------------------------------------------------------ file list helpers
     def _selected_entry_idx(self):
@@ -847,25 +828,17 @@ class PlasmaCamApp:
         with self.serial_lock:
             self.ser.write(byte)
 
-    # ------------------------------------------------------------------ terminal log
+    # ------------------------------------------------------------------ terminal log (コンソール表示に統合)
     def _log_terminal(self, text, tag=None):
-        def _do():
-            if not hasattr(self, 'terminal'):
-                return
-            self.terminal.config(state=tk.NORMAL)
-            if tag:
-                self.terminal.insert(tk.END, text + '\n', tag)
-            else:
-                self.terminal.insert(tk.END, text + '\n')
-            self.terminal.see(tk.END)
-            self.terminal.config(state=tk.DISABLED)
-        self.root.after(0, _do)
+        """旧terminal → self.console に転送"""
+        # タグを _log のタグ名に変換
+        tag_map = {'send': 'send', 'error': 'error', 'alarm': 'error',
+                   'ok': 'recv'}
+        mapped = tag_map.get(tag, 'recv') if tag else 'recv'
+        self.root.after(0, lambda: self._log(text, mapped))
 
     def _clear_terminal(self):
-        if hasattr(self, 'terminal'):
-            self.terminal.config(state=tk.NORMAL)
-            self.terminal.delete('1.0', tk.END)
-            self.terminal.config(state=tk.DISABLED)
+        self._clear_console()
 
     def _handle_grbl_line(self, line):
         """GRBLからの1行を解析してUI更新・ログ出力する（任意スレッドから呼び出し可）。"""
