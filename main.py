@@ -97,16 +97,14 @@ class PlasmaCamApp:
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
-        # 上段（メインエリア） / 下段（コンソール）に分割
-        outer = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
-        outer.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # コンソールを下部固定、上部をメインエリアに
+        con_frame = ttk.LabelFrame(self.root, text='コンソール (GRBL通信ログ)',
+                                   height=160)
+        con_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(0, 5))
+        con_frame.pack_propagate(False)  # 高さ固定
 
-        main = ttk.Frame(outer)
-        outer.add(main, weight=5)
-
-        # コンソールパネル
-        con_frame = ttk.LabelFrame(outer, text='コンソール (GRBL通信ログ)')
-        outer.add(con_frame, weight=1)
+        main = ttk.Frame(self.root)
+        main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=(5, 0))
 
         self.console = tk.Text(con_frame, height=6, bg='#0e0e0e', fg='#00ff88',
                                font=('Consolas', 9), wrap='none',
