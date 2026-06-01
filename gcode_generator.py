@@ -195,72 +195,44 @@ def _hierarchical_order(paths, ox, oy):
 
 def _calc_lead_start(path, offset_pts, is_inner, lead_len, ox, oy):
     """
-    カット開始点での接線→法線を計算し、
-    適切な方向（内側or外側）にリードイン始点を置く。
+    リードイン始点を計算する。
 
-    穴(is_inner=True) : 法線の「重心向き」= 穴内部(捨て材) から入る
-    外形(is_inner=False): 法線の「重心逆向き」= 輪郭外側(捨て材) から入る
+    【ルール】全パス共通:
+      lead_start = カット開始点 + 重心方向(内向き) * lead_len
+
+    ・穴  → 穴の内側(捨て材)に pierce → エッジが綺麗
+    ・外形 → 製品内側に pierce → 外周エッジに傷なし
     """
     if lead_len <= 0:
         return None
 
-    # カット開始点と接線ベクトル
+    # カット開始点
     if offset_pts and len(offset_pts) >= 2:
-        sx, sy   = offset_pts[0]
-        tx, ty   = offset_pts[1][0]-offset_pts[0][0], \
-                   offset_pts[1][1]-offset_pts[0][1]
-        all_pts  = offset_pts
+        sx, sy  = offset_pts[0]
+        all_pts = offset_pts
     else:
-        seg = path.segments[0]
-        sx, sy = seg.start
-        tx, ty = _tangent_at_start(seg)
+        sx, sy  = path.segments[0].start
         all_pts = path.get_display_points()
-
-    # 接線を正規化
-    td = math.hypot(tx, ty)
-    if td < 1e-10:
-        tx, ty = 1.0, 0.0
-    else:
-        tx, ty = tx/td, ty/td
-
-    # 左法線 (CCW回転), 右法線 (CW回転)
-    lnx, lny =  -ty,  tx   # 左法線
-    rnx, rny =   ty, -tx   # 右法線
 
     # 重心を計算
     if all_pts:
         cx = sum(p[0] for p in all_pts) / len(all_pts)
         cy = sum(p[1] for p in all_pts) / len(all_pts)
     else:
-        cx, cy = sx, sy
+        return (sx + ox, sy + oy)
 
-    # 重心方向ベクトル
-    gcx, gcy = cx - sx, cy - sy
-    gd = math.hypot(gcx, gcy)
-    if gd < 1e-10:
-        gcx, gcy = 0.0, 1.0
-    else:
-        gcx, gcy = gcx/gd, gcy/gd
+    # 重心→開始点 の方向（内向き単位ベクトル）
+    dx = cx - sx
+    dy = cy - sy
+    d  = math.hypot(dx, dy)
+    if d < 1e-10:
+        return (sx + ox, sy + oy)
 
-    # 左法線・右法線どちらが重心向きか
-    left_dot  = lnx*gcx + lny*gcy
-    right_dot = rnx*gcx + rny*gcy
+    # lead_start = 開始点から重心方向へ lead_len 移動
+    nx = dx / d * lead_len
+    ny = dy / d * lead_len
 
-    if left_dot >= right_dot:
-        inward_nx,  inward_ny  = lnx,  lny
-        outward_nx, outward_ny = rnx,  rny
-    else:
-        inward_nx,  inward_ny  = rnx,  rny
-        outward_nx, outward_ny = lnx,  lny
-
-    if is_inner:
-        # 穴: 重心方向(穴内部=捨て材)にオフセット → 内側から入る
-        offx, offy = inward_nx * lead_len, inward_ny * lead_len
-    else:
-        # 外形: 重心逆方向(輪郭外側=捨て材)にオフセット → 外側から入る
-        offx, offy = outward_nx * lead_len, outward_ny * lead_len
-
-    return (sx + offx + ox, sy + offy + oy)
+    return (sx + nx + ox, sy + ny + oy)
 
 
 def _tangent_at_start(seg) -> tuple:
