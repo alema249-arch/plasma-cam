@@ -886,13 +886,27 @@ class PlasmaCamApp:
 
         step_row = ttk.Frame(step_f)
         step_row.pack(pady=4, fill=tk.X, padx=6)
-        ttk.Label(step_row, text='移動量:').pack(side=tk.LEFT)
+        ttk.Label(step_row, text='XY:').pack(side=tk.LEFT)
         self.jog_step = tk.StringVar(value='10')
-        ttk.Entry(step_row, textvariable=self.jog_step, width=7).pack(side=tk.LEFT, padx=4)
+        ttk.Entry(step_row, textvariable=self.jog_step, width=6).pack(side=tk.LEFT, padx=3)
         ttk.Button(step_row, text='-10', width=4,
                    command=lambda: self._change_step(-10)).pack(side=tk.LEFT, padx=1)
         ttk.Button(step_row, text='+10', width=4,
                    command=lambda: self._change_step(10)).pack(side=tk.LEFT, padx=1)
+
+        # Z軸専用移動距離
+        z_step_row = ttk.Frame(step_f)
+        z_step_row.pack(fill=tk.X, padx=6, pady=(0, 2))
+        ttk.Label(z_step_row, text='Z :', foreground='#00897B',
+                  font=('', 9, 'bold')).pack(side=tk.LEFT)
+        self.jog_step_z = tk.StringVar(value='1')
+        ttk.Entry(z_step_row, textvariable=self.jog_step_z, width=6).pack(side=tk.LEFT, padx=3)
+        ttk.Button(z_step_row, text='-1',  width=4,
+                   command=lambda: self._change_step_z(-1)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(z_step_row, text='+1',  width=4,
+                   command=lambda: self._change_step_z(1)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(z_step_row, text='+10', width=4,
+                   command=lambda: self._change_step_z(10)).pack(side=tk.LEFT, padx=1)
 
         speed_row = ttk.Frame(step_f)
         speed_row.pack(fill=tk.X, padx=6, pady=(0, 4))
@@ -919,7 +933,7 @@ class PlasmaCamApp:
         ttk.Button(btn_grid, text='Y-', width=W,
                    command=lambda: self._jog(0, -1, 0)).grid(row=2, column=1, padx=3, pady=3)
 
-        # Z軸ジョグ（右側に縦並び）
+        # Z軸ジョグ（右側・独自移動距離使用）
         ttk.Separator(btn_grid, orient=tk.VERTICAL).grid(
             row=0, column=3, rowspan=3, sticky='ns', padx=6)
         ttk.Label(btn_grid, text='Z', font=('', 9, 'bold'),
@@ -1279,6 +1293,14 @@ class PlasmaCamApp:
         except ValueError:
             self.jog_step.set('10')
 
+    def _change_step_z(self, delta):
+        try:
+            val = float(self.jog_step_z.get()) + delta
+            val = max(0.01, val)
+            self.jog_step_z.set(f'{val:.0f}' if val >= 1 else f'{val:.2f}')
+        except ValueError:
+            self.jog_step_z.set('1')
+
     def _change_offset(self, axis, delta):
         idx = self._selected_entry_idx()
         if idx is None or not self.dxf_entries:
@@ -1314,7 +1336,12 @@ class PlasmaCamApp:
         if dy:
             axis += f' Y{dy * step:.3f}'
         if dz:
-            axis += f' Z{dz * step:.3f}'
+            # Z軸は専用ステップを使用
+            try:
+                z_step = float(self.jog_step_z.get())
+            except (ValueError, AttributeError):
+                z_step = step
+            axis += f' Z{dz * z_step:.3f}'
         if not axis:
             return
         self._send_serial(f'$J=G21 G91{axis} F{speed}')
