@@ -631,42 +631,36 @@ class PlasmaCamApp:
         sf.pack(fill=tk.X, padx=5, pady=(4, 2))
 
         s = self._saved_settings
-        self.feed_rate        = tk.StringVar(value=s.get('feed_rate',       '3000'))
-        self.pierce_delay     = tk.StringVar(value='0.5')   # 後方互換のため保持
-        self.kerf_width       = tk.StringVar(value=s.get('kerf_width',      '1.5'))
-        self.lead_in_length   = tk.StringVar(value=s.get('lead_in_length',  '5.0'))
-        self.lead_out_length  = tk.StringVar(value=s.get('lead_out_length', '3.0'))
+        self.feed_rate        = tk.StringVar(value=s.get('feed_rate',        '3000'))
+        self.kerf_width       = tk.StringVar(value=s.get('kerf_width',       '1.5'))
+        self.lead_in_length   = tk.StringVar(value=s.get('lead_in_length',   '5.0'))
+        self.lead_out_length  = tk.StringVar(value=s.get('lead_out_length',  '3.0'))
+        self.pierce_delay     = tk.StringVar(value=s.get('pierce_delay',     '0.5'))
+        self.post_cut_delay   = tk.StringVar(value=s.get('post_cut_delay',   '0.0'))
 
-        g(sf, 'カット速度(mm/min)', self.feed_rate,       0, 0)
-        g(sf, 'カーフ幅(mm)',       self.kerf_width,      0, 1)
-        g(sf, 'リードイン(mm)',     self.lead_in_length,  1, 0)
-        g(sf, 'リードアウト(mm)',   self.lead_out_length, 1, 1)
+        g(sf, 'カット速度(mm/min)',  self.feed_rate,       0, 0)
+        g(sf, 'カーフ幅(mm)',        self.kerf_width,      0, 1)
+        g(sf, 'リードイン(mm)',      self.lead_in_length,  1, 0)
+        g(sf, 'リードアウト(mm)',    self.lead_out_length, 1, 1)
+        g(sf, 'ピアス待機(秒)',      self.pierce_delay,    2, 0)
+        g(sf, '切断後待機(秒)',      self.post_cut_delay,  2, 1)
 
         li_f = ttk.Frame(sf)
-        li_f.grid(row=2, column=0, columnspan=4, sticky='w', padx=6, pady=2)
+        li_f.grid(row=3, column=0, columnspan=4, sticky='w', padx=6, pady=2)
         self.lead_in_type = tk.StringVar(value=s.get('lead_in_type', 'line'))
         ttk.Label(li_f, text='リードイン種類:', font=('',8)).pack(side=tk.LEFT)
         ttk.Radiobutton(li_f, text='直線', variable=self.lead_in_type, value='line').pack(side=tk.LEFT)
         ttk.Radiobutton(li_f, text='円弧', variable=self.lead_in_type, value='arc').pack(side=tk.LEFT)
 
-        # ---- スマートピアシング ----
-        pf = ttk.LabelFrame(parent, text='スマートピアシング')
+        # プリセット（コンパクト版）
+        pf = ttk.LabelFrame(parent, text='プリセット')
         pf.pack(fill=tk.X, padx=5, pady=(2, 2))
-
-        self.hot_start_distance = tk.StringVar(value=s.get('hot_start_distance', '50.0'))
-        self.hot_start_time     = tk.StringVar(value=s.get('hot_start_time',      '2.5'))
-        self.hot_pierce_ms      = tk.StringVar(value=s.get('hot_pierce_ms',       '800'))
-        self.cold_pierce_ms     = tk.StringVar(value=s.get('cold_pierce_ms',     '2400'))
-        self.rapid_speed        = tk.StringVar(value=s.get('rapid_speed',         '5000'))
-
-        # プリセット行
         pr_row = ttk.Frame(pf)
-        pr_row.pack(fill=tk.X, padx=4, pady=(4, 2))
-        ttk.Label(pr_row, text='プリセット:', font=('',8)).pack(side=tk.LEFT)
+        pr_row.pack(fill=tk.X, padx=4, pady=4)
         self._preset_var = tk.StringVar()
         self._preset_cb  = ttk.Combobox(pr_row, textvariable=self._preset_var,
-                                         width=7, state='readonly')
-        self._preset_cb.pack(side=tk.LEFT, padx=3)
+                                         width=10, state='readonly')
+        self._preset_cb.pack(side=tk.LEFT, padx=(0,3))
         self._preset_cb.bind('<<ComboboxSelected>>', self._apply_preset)
         ttk.Button(pr_row, text='保存', width=4,
                    command=self._save_preset).pack(side=tk.LEFT, padx=1)
@@ -674,18 +668,12 @@ class PlasmaCamApp:
                    command=self._delete_preset).pack(side=tk.LEFT, padx=1)
         self._refresh_preset_list()
 
-        # 判定条件グリッド
-        cond = ttk.Frame(pf)
-        cond.pack(fill=tk.X, padx=4, pady=1)
-        g(cond, 'ホット判定距離(mm)', self.hot_start_distance, 0, 0)
-        g(cond, 'ホット判定時間(s)',  self.hot_start_time,     0, 1)
-        g(cond, 'ラピッド速度(mm/min)', self.rapid_speed,      1, 0)
-
-        # ピアシング時間グリッド
-        pt = ttk.Frame(pf)
-        pt.pack(fill=tk.X, padx=4, pady=(1,4))
-        g(pt, 'ホット時(ms)',   self.hot_pierce_ms,  0, 0)
-        g(pt, 'コールド時(ms)', self.cold_pierce_ms, 0, 1)
+        # 後方互換用（他の箇所から参照されるため）
+        self.hot_pierce_ms      = tk.StringVar(value='0')
+        self.cold_pierce_ms     = tk.StringVar(value='0')
+        self.hot_start_distance = tk.StringVar(value='0')
+        self.hot_start_time     = tk.StringVar(value='0')
+        self.rapid_speed        = tk.StringVar(value='5000')
 
         # ---- ファイルリスト ----
         ff = ttk.LabelFrame(parent, text='DXFファイル')
@@ -805,10 +793,12 @@ class PlasmaCamApp:
         if name not in self._presets:
             return
         p = self._presets[name]
-        self.hot_start_distance.set(p.get('hot_start_distance', '50.0'))
-        self.hot_start_time.set(p.get('hot_start_time',     '2.5'))
-        self.hot_pierce_ms.set(p.get('hot_pierce_ms',       '800'))
-        self.cold_pierce_ms.set(p.get('cold_pierce_ms',    '2400'))
+        if 'feed_rate'      in p: self.feed_rate.set(p['feed_rate'])
+        if 'kerf_width'     in p: self.kerf_width.set(p['kerf_width'])
+        if 'lead_in_length' in p: self.lead_in_length.set(p['lead_in_length'])
+        if 'lead_out_length'in p: self.lead_out_length.set(p['lead_out_length'])
+        if 'pierce_delay'   in p: self.pierce_delay.set(p['pierce_delay'])
+        if 'post_cut_delay' in p: self.post_cut_delay.set(p['post_cut_delay'])
 
     def _save_preset(self):
         from tkinter.simpledialog import askstring
@@ -818,10 +808,12 @@ class PlasmaCamApp:
             return
         name = name.strip()
         self._presets[name] = {
-            'hot_start_distance': self.hot_start_distance.get(),
-            'hot_start_time':     self.hot_start_time.get(),
-            'hot_pierce_ms':      self.hot_pierce_ms.get(),
-            'cold_pierce_ms':     self.cold_pierce_ms.get(),
+            'feed_rate':       self.feed_rate.get(),
+            'kerf_width':      self.kerf_width.get(),
+            'lead_in_length':  self.lead_in_length.get(),
+            'lead_out_length': self.lead_out_length.get(),
+            'pierce_delay':    self.pierce_delay.get(),
+            'post_cut_delay':  self.post_cut_delay.get(),
         }
         try:
             raw = {k: str(v) for k, v in self._get_settings().items()}
@@ -1542,16 +1534,13 @@ class PlasmaCamApp:
 
     def _get_settings(self):
         return {
-            'feed_rate':          float(self.feed_rate.get()),
-            'kerf_width':         float(self.kerf_width.get()),
-            'lead_in_length':     float(self.lead_in_length.get()),
-            'lead_in_type':       self.lead_in_type.get(),
-            'lead_out_length':    float(self.lead_out_length.get()),
-            'hot_start_distance': float(self.hot_start_distance.get()),
-            'hot_start_time':     float(self.hot_start_time.get()),
-            'hot_pierce_ms':      float(self.hot_pierce_ms.get()),
-            'cold_pierce_ms':     float(self.cold_pierce_ms.get()),
-            'rapid_speed':        float(self.rapid_speed.get()),
+            'feed_rate':        float(self.feed_rate.get()),
+            'kerf_width':       float(self.kerf_width.get()),
+            'lead_in_length':   float(self.lead_in_length.get()),
+            'lead_in_type':     self.lead_in_type.get(),
+            'lead_out_length':  float(self.lead_out_length.get()),
+            'pierce_delay':     float(self.pierce_delay.get()),
+            'post_cut_delay':   float(self.post_cut_delay.get()),
         }
 
     # ------------------------------------------------------------------ CAM editor
