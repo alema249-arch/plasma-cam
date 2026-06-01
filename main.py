@@ -2213,6 +2213,12 @@ class CamEditorWindow:
         ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(
             side=tk.LEFT, fill=tk.Y, padx=8)
 
+        ttk.Button(btn_frame, text='🎯 ここへ移動',
+                   command=self._goto_selected).pack(side=tk.LEFT, padx=3)
+
+        ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8)
+
         ttk.Button(btn_frame, text='🔃 自動順序に戻す',
                    command=self._auto_order).pack(side=tk.LEFT, padx=3)
 
@@ -2286,6 +2292,50 @@ class CamEditorWindow:
             return
         item = self.plan[idx]
         self.app.highlight_path(item['entry'], item['path_idx'])
+
+    def _goto_selected(self):
+        """選択パスの開始点へマシンを移動（G0）"""
+        idx = self._selected_idx()
+        if idx is None:
+            messagebox.showwarning('未選択', 'パスを選択してください', parent=self._win)
+            return
+
+        # シリアル接続確認
+        if not self.app.ser or not self.app.ser.is_open:
+            messagebox.showwarning('未接続',
+                                   '先にシリアル接続してください\n'
+                                   '（設定タブ → 接続ボタン）',
+                                   parent=self._win)
+            return
+
+        item = self.plan[idx]
+        entry    = item['entry']
+        path     = item['path']
+        ox = entry.get('offset_x', 0.0)
+        oy = entry.get('offset_y', 0.0)
+
+        # パスの開始点を取得
+        if path.segments:
+            sx = path.segments[0].start[0] + ox
+            sy = path.segments[0].start[1] + oy
+        else:
+            messagebox.showwarning('エラー', 'パスに座標がありません', parent=self._win)
+            return
+
+        msg = (f'トーチを以下の位置に移動します:\n\n'
+               f'  X = {sx:.3f} mm\n'
+               f'  Y = {sy:.3f} mm\n\n'
+               f'よろしいですか？')
+        if not messagebox.askyesno('移動確認', msg, parent=self._win):
+            return
+
+        safe_z = float(self.app._get_settings().get('safe_z', 5.0)) \
+            if hasattr(self.app, '_get_settings') else 5.0
+
+        # 安全高さに上げてから移動
+        self.app._send_serial(f'G0 Z{safe_z:.3f}')
+        self.app._send_serial(f'G0 X{sx:.3f} Y{sy:.3f}')
+        self.app._log(f'>>> 🎯 G0 X{sx:.3f} Y{sy:.3f}  (パス{idx+1} 開始点)', 'send')
 
     def _on_double_click(self, e):
         self._toggle_leadin()
