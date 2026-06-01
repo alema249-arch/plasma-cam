@@ -355,6 +355,66 @@ class PlasmaCamApp:
 
         self.canvas_widget.draw_idle()
 
+    def highlight_path(self, entry, path_idx):
+        """指定パスをハイライト表示してキャンバスを中央寄せ"""
+        if entry is None or path_idx is None:
+            return
+        ox = entry.get('offset_x', 0.0)
+        oy = entry.get('offset_y', 0.0)
+        path = entry['paths'][path_idx]
+        pts  = path.get_display_points()
+        if not pts:
+            return
+
+        xs = [p[0] + ox for p in pts]
+        ys = [p[1] + oy for p in pts]
+
+        # 既存ハイライトを消す
+        if hasattr(self, '_highlight_artist') and self._highlight_artist:
+            try:
+                self._highlight_artist.remove()
+            except Exception:
+                pass
+            self._highlight_artist = None
+        if hasattr(self, '_highlight_bbox') and self._highlight_bbox:
+            try:
+                self._highlight_bbox.remove()
+            except Exception:
+                pass
+            self._highlight_bbox = None
+
+        # ハイライト線（黄色・太め）
+        hl, = self.ax.plot(xs, ys,
+                           color='#ffff00', linewidth=3.5,
+                           alpha=0.9, zorder=10, linestyle='-')
+        self._highlight_artist = hl
+
+        # 開始点マーカー
+        bx, = self.ax.plot([xs[0]], [ys[0]], 'o',
+                           color='#ff4444', markersize=10, zorder=11)
+        self._highlight_bbox = bx
+
+        # キャンバスをそのパスに中央寄せ（ズーム付き）
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        padx = max((xmax - xmin) * 0.6, 30)
+        pady = max((ymax - ymin) * 0.6, 30)
+        self.ax.set_xlim(xmin - padx, xmax + padx)
+        self.ax.set_ylim(ymin - pady, ymax + pady)
+
+        self.canvas_widget.draw_idle()
+
+    def clear_highlight(self):
+        for attr in ('_highlight_artist', '_highlight_bbox'):
+            artist = getattr(self, attr, None)
+            if artist:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        self.canvas_widget.draw_idle()
+
     def _draw_paths(self):
         for art in self._all_artists:
             for key in ('line', 'offset_line', 'marker', 'label'):
@@ -2102,10 +2162,11 @@ class CamEditorWindow:
         win.title('⚙ CAM編集 - 切断順序 / リードイン方向')
         win.geometry('700x520')
         self._win = win
+        win.protocol('WM_DELETE_WINDOW', self._on_close_editor)
 
         # ── 説明 ──
         tk.Label(win,
-                 text='行を選択して ↑↓ で順序変更  /  リードイン方向を内側・外側で切替',
+                 text='行をクリック → キャンバスで場所を確認  ／  ↑↓で順序変更  ／  ダブルクリックでリードイン切替',
                  font=('Yu Gothic UI', 9), fg='#555').pack(pady=(8, 2))
 
         # ── テーブル ──
@@ -2128,9 +2189,11 @@ class CamEditorWindow:
         self._tv.configure(yscrollcommand=sb.set)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self._tv.pack(fill=tk.BOTH, expand=True)
-        self._tv.bind('<Double-1>', self._on_double_click)
-        self._tv.tag_configure('outer', background='#fff3e0')
-        self._tv.tag_configure('inner', background='#e8f5e9')
+        self._tv.bind('<Double-1>',          self._on_double_click)
+        self._tv.bind('<<TreeviewSelect>>', self._on_select)
+        self._tv.tag_configure('outer',    background='#fff3e0')
+        self._tv.tag_configure('inner',    background='#e8f5e9')
+        self._tv.tag_configure('selected', background='#fffacd')
 
         # ── ボタン行 ──
         btn_frame = ttk.Frame(win)
@@ -2215,6 +2278,15 @@ class CamEditorWindow:
         self._refresh()
         self._tv.selection_set(str(idx))
 
+    def _on_select(self, e=None):
+        """行選択 → メインキャンバスでパスをハイライト"""
+        idx = self._selected_idx()
+        if idx is None:
+            self.app.clear_highlight()
+            return
+        item = self.plan[idx]
+        self.app.highlight_path(item['entry'], item['path_idx'])
+
     def _on_double_click(self, e):
         self._toggle_leadin()
 
@@ -2244,9 +2316,14 @@ class CamEditorWindow:
 
     def _apply(self):
         self.app.apply_cam_plan(self.plan)
+        self.app.clear_highlight()
         messagebox.showinfo('適用完了',
                             f'{len(self.plan)}パスのCAM計画を適用しました。\n'
                             '「▶ プレビュー」または「💾 保存」で確認できます。')
+        self._win.destroy()
+
+    def _on_close_editor(self):
+        self.app.clear_highlight()
         self._win.destroy()
 
 
