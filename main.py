@@ -127,11 +127,32 @@ class PlasmaCamApp:
         # ── 列1: キャンバス ──────────────────────────────
         cf = ttk.LabelFrame(h_pane, text='マシンビュー')
         h_pane.add(cf, minsize=380, stretch='always')
+
+        # キャンバス上部ツールバー
+        canvas_tb = tk.Frame(cf, bg='#f0f0f0')
+        canvas_tb.pack(fill=tk.X)
+        self._goto_mode = tk.BooleanVar(value=False)
+        self._goto_btn = tk.Checkbutton(
+            canvas_tb, text='🎯 クリックで移動',
+            variable=self._goto_mode,
+            indicatoron=False,
+            selectcolor='#ffcc00',
+            bg='#e0e0e0', activebackground='#ffcc00',
+            font=('Yu Gothic UI', 9, 'bold'),
+            relief='raised', padx=8, pady=3,
+            cursor='hand2',
+            command=self._on_goto_mode_toggle)
+        self._goto_btn.pack(side=tk.LEFT, padx=6, pady=3)
+        self._goto_pos_label = tk.Label(
+            canvas_tb, text='', bg='#f0f0f0',
+            fg='#333', font=('Consolas', 9))
+        self._goto_pos_label.pack(side=tk.LEFT, padx=8)
+
         self.fig, self.ax = plt.subplots(figsize=(8, 7))
         self.fig.subplots_adjust(bottom=0.04, top=0.96, left=0.08, right=0.98)
         self.canvas_widget = FigureCanvasTkAgg(self.fig, master=cf)
         self.canvas_widget.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        ttk.Label(cf, text='左ドラッグ:移動  右:視点  ホイール:ズーム',
+        ttk.Label(cf, text='左ドラッグ:DXF移動  右ドラッグ:視点  ホイール:ズーム  🎯ONでクリック移動',
                   foreground='#666', font=('', 8)).pack(pady=1)
         self._init_canvas()
         self._connect_canvas_events()
@@ -288,9 +309,32 @@ class PlasmaCamApp:
         self.ax.set_ylim([cy + (y - cy) * factor for y in self.ax.get_ylim()])
         self.canvas_widget.draw_idle()
 
+    def _on_goto_mode_toggle(self):
+        if self._goto_mode.get():
+            self._goto_btn.config(relief='sunken', bg='#ffcc00')
+            self._goto_pos_label.config(text='キャンバスをクリックして移動先を指定')
+        else:
+            self._goto_btn.config(relief='raised', bg='#e0e0e0')
+            self._goto_pos_label.config(text='')
+
     def _on_press(self, event):
         if event.inaxes != self.ax:
             return
+
+        # 🎯 移動モードON かつ 左クリック → その座標へ移動
+        if self._goto_mode.get() and event.button == 1:
+            x = round(event.xdata, 3)
+            y = round(event.ydata, 3)
+            self._goto_pos_label.config(
+                text=f'→ X={x:.3f}  Y={y:.3f}')
+            if self.ser and self.ser.is_open:
+                self._send_serial(f'G0 X{x:.3f} Y{y:.3f}')
+                self._log(f'>>> 🎯 G0 X{x:.3f} Y{y:.3f}', 'send')
+            else:
+                self._goto_pos_label.config(
+                    text=f'⚠ 未接続  X={x:.3f}  Y={y:.3f}')
+            return
+
         self._drag_start_px = (event.x, event.y)
         self._drag_transform = self.ax.transData.inverted().frozen()
         if event.button == 1:
