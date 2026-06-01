@@ -51,28 +51,51 @@ def generate_gcode(dxf_entries: list, settings: dict) -> str:
         def px(x): return x + ox
         def py(y): return y + oy
 
-        # 内外判定 → 面積小さい順(穴優先) → 外周は必ず最後
+        # 内外判定
         inner_flags = compute_path_types(paths)
 
+        def _centroid(p):
+            pts = p.get_display_points()
+            if not pts:
+                return (0.0, 0.0)
+            return (sum(x for x,y in pts)/len(pts),
+                    sum(y for x,y in pts)/len(pts))
+
+        # 穴グループ → 最近隣法で順序最適化、外周グループ → 面積大きい順で最後
+        inner_idxs = [i for i,f in enumerate(inner_flags) if f]
+        outer_idxs = [i for i,f in enumerate(inner_flags) if not f]
+
+        # 穴を最近隣順に並べる（短い移動で連続切断）
+        def _nearest_neighbor(idxs):
+            if not idxs:
+                return []
+            remaining = list(idxs)
+            result = [remaining.pop(0)]
+            while remaining:
+                last_c = _centroid(paths[result[-1]])
+                nearest = min(remaining,
+                              key=lambda i: math.hypot(
+                                  _centroid(paths[i])[0] - last_c[0],
+                                  _centroid(paths[i])[1] - last_c[1]))
+                result.append(nearest)
+                remaining.remove(nearest)
+            return result
+
+        # 外周は面積大きい順（最外周が最後）
         def _path_area(p):
             pts = p.get_display_points()
             if len(pts) < 3:
                 return 0.0
-            # Shoelace formula
             n = len(pts)
             return abs(sum(
                 pts[i][0]*pts[(i+1)%n][1] - pts[(i+1)%n][0]*pts[i][1]
-                for i in range(n)
-            )) / 2.0
+                for i in range(n))) / 2.0
 
-        # キー: (is_outer=0/1, area)  → 穴を先に、外周は面積大きい順で後
-        order = sorted(range(len(paths)),
-                       key=lambda idx: (
-                           1 if not inner_flags[idx] else 0,   # 穴(0)→外周(1)
-                           _path_area(paths[idx])               # 小さい穴から
-                       ))
-        paths_sorted = [paths[idx]       for idx in order]
-        flags_sorted = [inner_flags[idx] for idx in order]
+        outer_idxs_sorted = sorted(outer_idxs, key=lambda i: _path_area(paths[i]))
+
+        order = _nearest_neighbor(inner_idxs) + outer_idxs_sorted
+        paths_sorted = [paths[i]       for i in order]
+        flags_sorted = [inner_flags[i] for i in order]
 
         for i, path in enumerate(paths_sorted):
             is_inner = flags_sorted[i]
@@ -134,9 +157,14 @@ def _path_endpoints(path, offset_pts, lead_in_length, lead_out_length,
         if lead_in_length > 0:
             cx = sum(p[0] for p in offset_pts) / len(offset_pts)
             cy = sum(p[1] for p in offset_pts) / len(offset_pts)
-            # 内側・外側ともに「重心→始点」方向 → lead_start は常に輪郭の内側から
-            dx = start[0] - cx
-            dy = start[1] - cy
+            if is_inner:
+                # 穴(内側): 重心→始点 方向(外向き) → lead_start が穴の内側(捨て材) ✓
+                dx = start[0] - cx
+                dy = start[1] - cy
+            else:
+                # 外周(外側): 始点→重心 方向(内向き) → lead_start が輪郭の外側(捨て材) ✓
+                dx = cx - start[0]
+                dy = cy - start[1]
             d  = math.hypot(dx, dy)
             ld = (dx / d, dy / d) if d > 1e-10 else (1.0, 0.0)
             g0 = (_px(start[0] - ld[0] * lead_in_length),
@@ -156,8 +184,11 @@ def _path_endpoints(path, offset_pts, lead_in_length, lead_out_length,
     else:
         start = path.segments[0].start
         if lead_in_length > 0:
-            if is_inner and path.closed:
-                ld = _centroid_dir(path)
+            if path.closed:
+                if is_inner:
+                    ld = _centroid_dir(path)          # 穴: 外側から内側へ → lead_start 内側 ✓
+                else:
+                    ld = _centroid_dir_outward(path)  # 外周: 内側から外側へ → lead_start 外側 ✓
             else:
                 ld = _seg_direction_at_start(path.segments[0])
             g0 = (_px(start[0] - ld[0] * lead_in_length),
@@ -184,9 +215,14 @@ def _generate_offset_path(lines, offset_pts, fr, pierce_delay,
     if lead_in_length > 0:
         cx = sum(p[0] for p in offset_pts) / len(offset_pts)
         cy = sum(p[1] for p in offset_pts) / len(offset_pts)
-        # 内側・外側ともに「重心→始点」方向 → lead_start は輪郭の内側から
-        dx = start[0] - cx
-        dy = start[1] - cy
+        if is_inner:
+            # 穴: 重心→始点(外向き) → lead_start が穴の内側(捨て材) ✓
+            dx = start[0] - cx
+            dy = start[1] - cy
+        else:
+            # 外周: 始点→重心(内向き) → lead_start が輪郭の外側(捨て材) ✓
+            dx = cx - start[0]
+            dy = cy - start[1]
         d = math.hypot(dx, dy)
         lead_dir = (dx / d, dy / d) if d > 1e-10 else (1.0, 0.0)
         lead_start = (start[0] - lead_dir[0] * lead_in_length,
@@ -221,10 +257,11 @@ def _generate_original_path(lines, path, fr, pierce_delay,
     if lead_in_length > 0:
         if path.closed:
             if is_inner:
-                # 内側・外側ともに「重心→始点」方向 → lead_start は輪郭の内側から
+                # 穴: 重心→始点(外向き) → lead_start が穴の内側(捨て材) ✓
                 lead_dir = _centroid_dir(path)
             else:
-                lead_dir = _centroid_dir(path)
+                # 外周: 始点→重心(内向き) → lead_start が輪郭の外側(捨て材) ✓
+                lead_dir = _centroid_dir_outward(path)
         else:
             lead_dir = _seg_direction_at_start(path.segments[0])
         lead_start = (
