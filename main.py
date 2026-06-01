@@ -649,6 +649,24 @@ class PlasmaCamApp:
         self.info_label = ttk.Label(ff, text='未選択', font=('', 8))
         self.info_label.pack(padx=5, pady=(0,3))
 
+        # ---- パス一覧 + 移動ボタン ----
+        pf = ttk.LabelFrame(parent, text='パス一覧')
+        pf.pack(fill=tk.X, padx=5, pady=(0, 2))
+
+        path_list_frame = ttk.Frame(pf)
+        path_list_frame.pack(fill=tk.X, padx=4, pady=(3,0))
+        self.path_listbox = tk.Listbox(path_list_frame, height=4,
+                                       selectmode=tk.SINGLE, font=('Consolas', 8))
+        psb = ttk.Scrollbar(path_list_frame, orient=tk.VERTICAL,
+                            command=self.path_listbox.yview)
+        self.path_listbox.config(yscrollcommand=psb.set)
+        self.path_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        psb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        ttk.Button(pf, text='🎯  ここへ移動',
+                   command=self._goto_selected_path).pack(
+                       fill=tk.X, padx=5, pady=(3, 5))
+
         btn_row_gc = ttk.Frame(parent)
         btn_row_gc.pack(fill=tk.X, padx=5, pady=2)
         ttk.Button(btn_row_gc, text='⚙ CAM編集',
@@ -892,6 +910,47 @@ class PlasmaCamApp:
         self.file_listbox.delete(0, tk.END)
         for e in self.dxf_entries:
             self.file_listbox.insert(tk.END, f"{e['name']}  ({len(e['paths'])}パス)")
+        self._update_path_listbox()
+
+    def _update_path_listbox(self):
+        """パス一覧リストボックスを再構築"""
+        if not hasattr(self, 'path_listbox'):
+            return
+        self.path_listbox.delete(0, tk.END)
+        self._path_list_data = []   # (entry, path_idx, sx, sy)
+        from gcode_generator import _hierarchical_order
+        for entry in self.dxf_entries:
+            ox = entry.get('offset_x', 0.0)
+            oy = entry.get('offset_y', 0.0)
+            try:
+                order, inner_flags = _hierarchical_order(entry['paths'], ox, oy)
+            except Exception:
+                order = list(range(len(entry['paths'])))
+                inner_flags = [False]*len(entry['paths'])
+            for seq, pidx in enumerate(order):
+                path = entry['paths'][pidx]
+                ptype = '穴' if inner_flags[pidx] else '外形'
+                if path.segments:
+                    sx = round(path.segments[0].start[0] + ox, 2)
+                    sy = round(path.segments[0].start[1] + oy, 2)
+                    label = f'{seq+1:>2}. [{ptype}] X{sx:7.2f} Y{sy:7.2f}  {entry["name"]}'
+                    self.path_listbox.insert(tk.END, label)
+                    self._path_list_data.append((entry, pidx, sx, sy))
+
+    def _goto_selected_path(self):
+        """選択パスの開始点へ即移動（確認なし）"""
+        if not hasattr(self, 'path_listbox'):
+            return
+        sel = self.path_listbox.curselection()
+        if not sel:
+            messagebox.showinfo('未選択', 'パスを選択してください')
+            return
+        if not self.ser or not self.ser.is_open:
+            messagebox.showwarning('未接続', '先に接続してください')
+            return
+        _, _, sx, sy = self._path_list_data[sel[0]]
+        self._send_serial(f'G0 X{sx:.3f} Y{sy:.3f}')
+        self._log(f'>>> 🎯 G0 X{sx:.3f} Y{sy:.3f}', 'send')
 
     def _update_info_label(self):
         if not self.dxf_entries:
