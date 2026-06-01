@@ -8,14 +8,16 @@ import os
 import threading
 import time
 import re
+import math
 import serial
 import serial.tools.list_ports
 
 matplotlib.rcParams['font.family'] = ['Yu Gothic', 'MS Gothic', 'Meiryo', 'sans-serif']
 
 from dxf_reader import read_dxf
-from gcode_generator import generate_gcode
+from gcode_generator import generate_gcode, generate_from_plan
 from kerf_offset import compute_offset_points, compute_path_types
+import settings_manager
 
 MACHINE_W = 1200
 MACHINE_H = 800
@@ -51,6 +53,9 @@ class PlasmaCamApp:
         self._drag_ylim = None
         self._drag_offset_start = None
         self._drag_entry_idx = None
+
+        # 設定ファイルからロード
+        self._saved_settings, self._presets = settings_manager.load()
 
         self._build_menu()
         self._build_ui()
@@ -385,9 +390,15 @@ class PlasmaCamApp:
             paths = entry['paths']
             inner_flags = compute_path_types(paths)
 
-            for j, path in enumerate(paths):
+            # 内側(穴)→外側 の順に並べ替え（Gコード生成と順番を合わせる）
+            order = sorted(range(len(paths)),
+                           key=lambda idx: (0 if inner_flags[idx] else 1))
+            paths_sorted = [paths[idx]       for idx in order]
+            flags_sorted = [inner_flags[idx] for idx in order]
+
+            for j, path in enumerate(paths_sorted):
                 pts = path.get_display_points()
-                is_inner = inner_flags[j]
+                is_inner = flags_sorted[j]
                 ptype = '内側(穴)' if is_inner else ('外側' if path.closed else '開路')
                 color = COLORS[path_global_idx % len(COLORS)]
 
@@ -447,6 +458,35 @@ class PlasmaCamApp:
         )
         self.canvas_widget.draw()
 
+    def _fit_view(self):
+        """全パスが収まるようにビューをフィット"""
+        if not self.dxf_entries:
+            self._reset_view()
+            return
+        all_xs, all_ys = [], []
+        for entry in self.dxf_entries:
+            ox, oy = entry['offset_x'], entry['offset_y']
+            for path in entry['paths']:
+                for p in path.get_display_points():
+                    all_xs.append(p[0] + ox)
+                    all_ys.append(p[1] + oy)
+        if not all_xs:
+            self._reset_view()
+            return
+        xmin, xmax = min(all_xs), max(all_xs)
+        ymin, ymax = min(all_ys), max(all_ys)
+        mx = max((xmax - xmin) * 0.15, 30)
+        my = max((ymax - ymin) * 0.15, 30)
+        self.ax.set_xlim(xmin - mx, xmax + mx)
+        self.ax.set_ylim(ymin - my, ymax + my)
+        self.canvas_widget.draw_idle()
+
+    def _reset_view(self):
+        """マシン全体が見えるデフォルトビューに戻す"""
+        self.ax.set_xlim(-80, MACHINE_W + 80)
+        self.ax.set_ylim(-60, MACHINE_H + 60)
+        self.canvas_widget.draw_idle()
+
     def _update_torch_display(self, x, y, z=None):
         self.pos_x_label.config(text=f'{x:9.3f} mm')
         self.pos_y_label.config(text=f'{y:9.3f} mm')
@@ -471,23 +511,62 @@ class PlasmaCamApp:
         sf = ttk.LabelFrame(parent, text='プラズマ設定')
         sf.pack(fill=tk.X, padx=5, pady=(4, 2))
 
-        self.feed_rate       = tk.StringVar(value='3000')
-        self.pierce_delay    = tk.StringVar(value='0.5')
-        self.kerf_width      = tk.StringVar(value='1.5')
-        self.lead_in_length  = tk.StringVar(value='5.0')
-        self.lead_out_length = tk.StringVar(value='3.0')
+        s = self._saved_settings
+        self.feed_rate        = tk.StringVar(value=s.get('feed_rate',       '3000'))
+        self.pierce_delay     = tk.StringVar(value='0.5')   # 後方互換のため保持
+        self.kerf_width       = tk.StringVar(value=s.get('kerf_width',      '1.5'))
+        self.lead_in_length   = tk.StringVar(value=s.get('lead_in_length',  '5.0'))
+        self.lead_out_length  = tk.StringVar(value=s.get('lead_out_length', '3.0'))
 
         g(sf, 'カット速度(mm/min)', self.feed_rate,       0, 0)
-        g(sf, 'ピアス遅延(秒)',     self.pierce_delay,    0, 1)
-        g(sf, 'カーフ幅(mm)',       self.kerf_width,      1, 0)
-        g(sf, 'リードイン(mm)',     self.lead_in_length,  1, 1)
-        g(sf, 'リードアウト(mm)',   self.lead_out_length, 2, 0)
+        g(sf, 'カーフ幅(mm)',       self.kerf_width,      0, 1)
+        g(sf, 'リードイン(mm)',     self.lead_in_length,  1, 0)
+        g(sf, 'リードアウト(mm)',   self.lead_out_length, 1, 1)
 
         li_f = ttk.Frame(sf)
-        li_f.grid(row=2, column=2, columnspan=2, sticky='w', padx=4)
-        self.lead_in_type = tk.StringVar(value='line')
+        li_f.grid(row=2, column=0, columnspan=4, sticky='w', padx=6, pady=2)
+        self.lead_in_type = tk.StringVar(value=s.get('lead_in_type', 'line'))
+        ttk.Label(li_f, text='リードイン種類:', font=('',8)).pack(side=tk.LEFT)
         ttk.Radiobutton(li_f, text='直線', variable=self.lead_in_type, value='line').pack(side=tk.LEFT)
         ttk.Radiobutton(li_f, text='円弧', variable=self.lead_in_type, value='arc').pack(side=tk.LEFT)
+
+        # ---- スマートピアシング ----
+        pf = ttk.LabelFrame(parent, text='スマートピアシング')
+        pf.pack(fill=tk.X, padx=5, pady=(2, 2))
+
+        self.hot_start_distance = tk.StringVar(value=s.get('hot_start_distance', '50.0'))
+        self.hot_start_time     = tk.StringVar(value=s.get('hot_start_time',      '2.5'))
+        self.hot_pierce_ms      = tk.StringVar(value=s.get('hot_pierce_ms',       '800'))
+        self.cold_pierce_ms     = tk.StringVar(value=s.get('cold_pierce_ms',     '2400'))
+        self.rapid_speed        = tk.StringVar(value=s.get('rapid_speed',         '5000'))
+
+        # プリセット行
+        pr_row = ttk.Frame(pf)
+        pr_row.pack(fill=tk.X, padx=4, pady=(4, 2))
+        ttk.Label(pr_row, text='プリセット:', font=('',8)).pack(side=tk.LEFT)
+        self._preset_var = tk.StringVar()
+        self._preset_cb  = ttk.Combobox(pr_row, textvariable=self._preset_var,
+                                         width=7, state='readonly')
+        self._preset_cb.pack(side=tk.LEFT, padx=3)
+        self._preset_cb.bind('<<ComboboxSelected>>', self._apply_preset)
+        ttk.Button(pr_row, text='保存', width=4,
+                   command=self._save_preset).pack(side=tk.LEFT, padx=1)
+        ttk.Button(pr_row, text='削除', width=4,
+                   command=self._delete_preset).pack(side=tk.LEFT, padx=1)
+        self._refresh_preset_list()
+
+        # 判定条件グリッド
+        cond = ttk.Frame(pf)
+        cond.pack(fill=tk.X, padx=4, pady=1)
+        g(cond, 'ホット判定距離(mm)', self.hot_start_distance, 0, 0)
+        g(cond, 'ホット判定時間(s)',  self.hot_start_time,     0, 1)
+        g(cond, 'ラピッド速度(mm/min)', self.rapid_speed,      1, 0)
+
+        # ピアシング時間グリッド
+        pt = ttk.Frame(pf)
+        pt.pack(fill=tk.X, padx=4, pady=(1,4))
+        g(pt, 'ホット時(ms)',   self.hot_pierce_ms,  0, 0)
+        g(pt, 'コールド時(ms)', self.cold_pierce_ms, 0, 1)
 
         # ---- ファイルリスト ----
         ff = ttk.LabelFrame(parent, text='DXFファイル')
@@ -512,12 +591,21 @@ class PlasmaCamApp:
 
         btn_row_gc = ttk.Frame(parent)
         btn_row_gc.pack(fill=tk.X, padx=5, pady=2)
-        ttk.Button(btn_row_gc, text='▶ 動作プレビュー',
-                   command=self.show_motion_preview).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        ttk.Button(btn_row_gc, text='⚙ CAM編集',
+                   command=self.show_cam_editor).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        ttk.Button(btn_row_gc, text='▶ プレビュー',
+                   command=self.show_motion_preview).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,2))
         ttk.Button(btn_row_gc, text='🔍 Gコード',
                    command=self.show_gcode_preview).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,2))
         ttk.Button(btn_row_gc, text='💾 保存',
                    command=self.save_gcode).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
+
+        btn_row_view = ttk.Frame(parent)
+        btn_row_view.pack(fill=tk.X, padx=5, pady=(0, 2))
+        ttk.Button(btn_row_view, text='🔭 全体を表示',
+                   command=self._fit_view).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        ttk.Button(btn_row_view, text='⌂ マシン全体',
+                   command=self._reset_view).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
 
         # ---- オフセット ----
         of = ttk.LabelFrame(parent, text='オフセット (mm)')
@@ -567,6 +655,65 @@ class PlasmaCamApp:
         self.conn_status.pack(padx=5, pady=(0,3))
 
         self._refresh_ports()
+
+    # ------------------------------------------------------------------ preset helpers
+    def _refresh_preset_list(self):
+        names = list(self._presets.keys())
+        self._preset_cb['values'] = names
+        if names and not self._preset_var.get():
+            self._preset_var.set(names[0])
+
+    def _apply_preset(self, event=None):
+        name = self._preset_var.get()
+        if name not in self._presets:
+            return
+        p = self._presets[name]
+        self.hot_start_distance.set(p.get('hot_start_distance', '50.0'))
+        self.hot_start_time.set(p.get('hot_start_time',     '2.5'))
+        self.hot_pierce_ms.set(p.get('hot_pierce_ms',       '800'))
+        self.cold_pierce_ms.set(p.get('cold_pierce_ms',    '2400'))
+
+    def _save_preset(self):
+        from tkinter.simpledialog import askstring
+        name = askstring('プリセット保存', 'プリセット名を入力してください:',
+                         parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self._presets[name] = {
+            'hot_start_distance': self.hot_start_distance.get(),
+            'hot_start_time':     self.hot_start_time.get(),
+            'hot_pierce_ms':      self.hot_pierce_ms.get(),
+            'cold_pierce_ms':     self.cold_pierce_ms.get(),
+        }
+        try:
+            raw = {k: str(v) for k, v in self._get_settings().items()}
+            settings_manager.save(raw, self._presets)
+        except Exception:
+            pass
+        self._refresh_preset_list()
+        self._preset_var.set(name)
+        messagebox.showinfo('保存完了', f'プリセット「{name}」を保存しました。')
+
+    def _delete_preset(self):
+        name = self._preset_var.get()
+        if not name:
+            messagebox.showwarning('警告', 'プリセットを選択してください')
+            return
+        if name not in self._presets:
+            messagebox.showwarning('警告', f'プリセット「{name}」が見つかりません')
+            return
+        if not messagebox.askyesno('確認', f'プリセット「{name}」を削除しますか？'):
+            return
+        del self._presets[name]
+        try:
+            raw = {k: str(v) for k, v in self._get_settings().items()}
+            settings_manager.save(raw, self._presets)
+        except Exception:
+            pass
+        self._refresh_preset_list()
+        self._preset_var.set(self._preset_cb['values'][0] if self._preset_cb['values'] else '')
+        messagebox.showinfo('削除完了', f'プリセット「{name}」を削除しました。')
 
     # ------------------------------------------------------------------ control tab
     def _build_control_tab(self, parent):
@@ -1147,30 +1294,97 @@ class PlasmaCamApp:
         try:
             paths = read_dxf(filename)
             name = os.path.basename(filename)
+
+            # ── 診断ログ & 自動配置オフセット計算 ────────────
+            etypes = getattr(read_dxf, '_last_entity_types', {})
+            etype_str = '  '.join(f'{k}×{v}' for k, v in sorted(etypes.items()))
+            self._log(f'📂 {name}  [{etype_str}]  →  {len(paths)}パス', 'info')
+            init_ox, init_oy = 0.0, 0.0
+            margin = 20.0
+            if len(paths) == 0:
+                self._log('  ⚠ パスが0本: 未対応エンティティか空ファイルの可能性', 'error')
+            else:
+                all_pts = [p for path in paths for p in path.get_display_points()]
+                if all_pts:
+                    xs = [p[0] for p in all_pts]
+                    ys = [p[1] for p in all_pts]
+                    self._log(f'  座標範囲  X={min(xs):.1f}〜{max(xs):.1f}'
+                              f'  Y={min(ys):.1f}〜{max(ys):.1f}', 'info')
+                    # 左下をマージン位置に揃えてマシン内に自動配置
+                    init_ox = round(margin - min(xs), 1)
+                    init_oy = round(margin - min(ys), 1)
+                else:
+                    self._log('  ⚠ パスはあるが表示点ゼロ', 'error')
+            # ──────────────────────────────────────────────
+
             self.dxf_entries.append({
                 'name': name,
                 'paths': paths,
-                'offset_x': 0.0,
-                'offset_y': 0.0,
+                'offset_x': init_ox,
+                'offset_y': init_oy,
             })
+            self._cam_plan = None  # DXF変更時はCAM計画をリセット
             self._update_file_listbox()
             self.file_listbox.selection_clear(0, tk.END)
             self.file_listbox.selection_set(len(self.dxf_entries) - 1)
             self._on_file_select()
             self._draw_paths()
+            self._fit_view()
             self._update_info_label()
         except Exception as e:
+            self._log(f'❌ DXF読み込みエラー: {e}', 'error')
             messagebox.showerror('エラー', f'DXFの読み込みに失敗しました:\n{e}')
 
     def _get_settings(self):
         return {
-            'feed_rate':      float(self.feed_rate.get()),
-            'pierce_delay':   float(self.pierce_delay.get()),
-            'kerf_width':     float(self.kerf_width.get()),
-            'lead_in_length': float(self.lead_in_length.get()),
-            'lead_in_type':   self.lead_in_type.get(),
-            'lead_out_length': float(self.lead_out_length.get()),
+            'feed_rate':          float(self.feed_rate.get()),
+            'kerf_width':         float(self.kerf_width.get()),
+            'lead_in_length':     float(self.lead_in_length.get()),
+            'lead_in_type':       self.lead_in_type.get(),
+            'lead_out_length':    float(self.lead_out_length.get()),
+            'hot_start_distance': float(self.hot_start_distance.get()),
+            'hot_start_time':     float(self.hot_start_time.get()),
+            'hot_pierce_ms':      float(self.hot_pierce_ms.get()),
+            'cold_pierce_ms':     float(self.cold_pierce_ms.get()),
+            'rapid_speed':        float(self.rapid_speed.get()),
         }
+
+    # ------------------------------------------------------------------ CAM editor
+    def show_cam_editor(self):
+        """切断順序・リードイン方向を手動編集するウィンドウ"""
+        if not self.dxf_entries:
+            messagebox.showwarning('警告', 'DXFファイルを先に開いてください')
+            return
+        CamEditorWindow(self.root, self.dxf_entries, self)
+
+    def get_cam_plan(self):
+        """現在の cam_plan を返す（なければ自動生成）"""
+        if hasattr(self, '_cam_plan') and self._cam_plan:
+            return self._cam_plan
+        # 自動生成
+        from gcode_generator import _hierarchical_order
+        plan = []
+        for entry in self.dxf_entries:
+            ox = entry.get('offset_x', 0.0)
+            oy = entry.get('offset_y', 0.0)
+            order, inner_flags = _hierarchical_order(entry['paths'], ox, oy)
+            for idx in order:
+                path = entry['paths'][idx]
+                pts = path.get_display_points()
+                ptype = '穴' if inner_flags[idx] else '外形'
+                plan.append({
+                    'entry':    entry,
+                    'path_idx': idx,
+                    'path':     path,
+                    'is_inner': inner_flags[idx],
+                    'leadin':   'inside',   # 'inside' or 'outside'
+                    'label':    f"{entry['name']} [{ptype}]",
+                })
+        self._cam_plan = plan
+        return plan
+
+    def apply_cam_plan(self, plan):
+        self._cam_plan = plan
 
     def show_motion_preview(self):
         """トーチ動作シミュレーションウィンドウ"""
@@ -1179,7 +1393,8 @@ class PlasmaCamApp:
             return
         try:
             settings = self._get_settings()
-            gcode = generate_gcode(self.dxf_entries, settings)
+            plan = self.get_cam_plan()
+            gcode = generate_from_plan(plan, settings) if plan else generate_gcode(self.dxf_entries, settings)
         except Exception as e:
             messagebox.showerror('エラー', str(e))
             return
@@ -1193,14 +1408,12 @@ class PlasmaCamApp:
         SimWindow(self.root, moves, self.dxf_entries)
 
     def _parse_gcode_moves(self, gcode):
-        """GコードをパースしてMoveリストに変換
+        """GコードをパースしてMoveリストに変換（G2/G3アーク補間対応）
         各Move: {'x','y','rapid':bool,'torch':bool}
         """
-        import re
         moves = []
-        cx, cy = 0.0, 0.0
+        cur_x, cur_y = 0.0, 0.0
         torch_on = False
-        rapid = True
 
         for line in gcode.split('\n'):
             s = line.strip()
@@ -1216,24 +1429,50 @@ class PlasmaCamApp:
             if up.startswith('M5'):
                 torch_on = False
                 continue
-            if up.startswith('G0'):
-                rapid = True
-            elif up.startswith('G1'):
-                rapid = False
-            elif up.startswith('G2') or up.startswith('G3'):
-                rapid = False
-            else:
-                continue
 
             mx = re.search(r'X([-\d.]+)', up)
             my = re.search(r'Y([-\d.]+)', up)
-            if mx:
-                cx = float(mx.group(1))
-            if my:
-                cy = float(my.group(1))
-            if mx or my:
-                moves.append({'x': cx, 'y': cy,
-                               'rapid': rapid, 'torch': torch_on})
+            mi = re.search(r'I([-\d.]+)', up)
+            mj = re.search(r'J([-\d.]+)', up)
+
+            ex = float(mx.group(1)) if mx else cur_x
+            ey = float(my.group(1)) if my else cur_y
+
+            if up.startswith('G0'):
+                moves.append({'x': ex, 'y': ey, 'rapid': True, 'torch': torch_on})
+                cur_x, cur_y = ex, ey
+
+            elif up.startswith('G1'):
+                moves.append({'x': ex, 'y': ey, 'rapid': False, 'torch': torch_on})
+                cur_x, cur_y = ex, ey
+
+            elif up.startswith('G2') or up.startswith('G3'):
+                ccw = up.startswith('G3')
+                ii = float(mi.group(1)) if mi else 0.0
+                jj = float(mj.group(1)) if mj else 0.0
+                acx = cur_x + ii
+                acy = cur_y + jj
+                r = math.hypot(cur_x - acx, cur_y - acy)
+                if r > 1e-10:
+                    sa = math.atan2(cur_y - acy, cur_x - acx)
+                    ea = math.atan2(ey - acy, ex - acx)
+                    if ccw:
+                        if ea <= sa:
+                            ea += 2 * math.pi
+                    else:
+                        if ea >= sa:
+                            ea -= 2 * math.pi
+                    arc_len = abs(ea - sa) * r
+                    steps = max(6, int(arc_len / 1.5))
+                    for k in range(1, steps + 1):
+                        angle = sa + (ea - sa) * k / steps
+                        moves.append({
+                            'x': acx + r * math.cos(angle),
+                            'y': acy + r * math.sin(angle),
+                            'rapid': False, 'torch': torch_on,
+                        })
+                cur_x, cur_y = ex, ey
+
         return moves
 
     def show_gcode_preview(self):
@@ -1243,7 +1482,8 @@ class PlasmaCamApp:
             return
         try:
             settings = self._get_settings()
-            gcode = generate_gcode(self.dxf_entries, settings)
+            plan = self.get_cam_plan()
+            gcode = generate_from_plan(plan, settings) if plan else generate_gcode(self.dxf_entries, settings)
         except ValueError:
             messagebox.showerror('エラー', '設定値に無効な数値があります')
             return
@@ -1572,6 +1812,12 @@ class PlasmaCamApp:
         self.polling = False
         if self.ser and self.ser.is_open:
             self.ser.close()
+        # 終了時に設定を自動保存
+        try:
+            raw = {k: str(v) for k, v in self._get_settings().items()}
+            settings_manager.save(raw, self._presets)
+        except Exception:
+            pass
         # 終了時にレイアウトを自動保存
         try:
             self._layouts['__last__'] = self._current_layout_dict()
@@ -1834,6 +2080,166 @@ class SimWindow:
 
     def _on_close(self):
         self._stop()
+        self._win.destroy()
+
+
+# ======================================================================
+# CamEditorWindow: 切断順序・リードイン方向 手動編集
+# ======================================================================
+class CamEditorWindow:
+    def __init__(self, parent, dxf_entries, app):
+        self.app = app
+        self.plan = app.get_cam_plan()[:]   # コピー
+
+        win = tk.Toplevel(parent)
+        win.title('⚙ CAM編集 - 切断順序 / リードイン方向')
+        win.geometry('700x520')
+        self._win = win
+
+        # ── 説明 ──
+        tk.Label(win,
+                 text='行を選択して ↑↓ で順序変更  /  リードイン方向を内側・外側で切替',
+                 font=('Yu Gothic UI', 9), fg='#555').pack(pady=(8, 2))
+
+        # ── テーブル ──
+        frame = ttk.Frame(win)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+        cols = ('order', 'type', 'leadin', 'name')
+        self._tv = ttk.Treeview(frame, columns=cols, show='headings',
+                                selectmode='browse', height=16)
+        self._tv.heading('order',  text='順番')
+        self._tv.heading('type',   text='種類')
+        self._tv.heading('leadin', text='リードイン方向')
+        self._tv.heading('name',   text='パス名')
+        self._tv.column('order',  width=55,  anchor='center')
+        self._tv.column('type',   width=70,  anchor='center')
+        self._tv.column('leadin', width=130, anchor='center')
+        self._tv.column('name',   width=380, anchor='w')
+
+        sb = ttk.Scrollbar(frame, command=self._tv.yview)
+        self._tv.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tv.pack(fill=tk.BOTH, expand=True)
+        self._tv.bind('<Double-1>', self._on_double_click)
+        self._tv.tag_configure('outer', background='#fff3e0')
+        self._tv.tag_configure('inner', background='#e8f5e9')
+
+        # ── ボタン行 ──
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=10, pady=6)
+
+        ttk.Button(btn_frame, text='⬆ 上へ',
+                   command=self._move_up).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text='⬇ 下へ',
+                   command=self._move_down).pack(side=tk.LEFT, padx=3)
+
+        ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8)
+
+        ttk.Button(btn_frame, text='🔄 リードイン切替 (内側↔外側)',
+                   command=self._toggle_leadin).pack(side=tk.LEFT, padx=3)
+
+        ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=8)
+
+        ttk.Button(btn_frame, text='🔃 自動順序に戻す',
+                   command=self._auto_order).pack(side=tk.LEFT, padx=3)
+
+        ttk.Button(btn_frame, text='✅ 適用して閉じる',
+                   command=self._apply).pack(side=tk.RIGHT, padx=3)
+        ttk.Button(btn_frame, text='キャンセル',
+                   command=win.destroy).pack(side=tk.RIGHT, padx=3)
+
+        # ── 凡例 ──
+        leg = ttk.Frame(win)
+        leg.pack(fill=tk.X, padx=10, pady=(0, 6))
+        tk.Frame(leg, bg='#e8f5e9', width=16, height=12).pack(side=tk.LEFT, padx=(0,3))
+        tk.Label(leg, text='穴(内径カット)', font=('',8)).pack(side=tk.LEFT, padx=(0,12))
+        tk.Frame(leg, bg='#fff3e0', width=16, height=12).pack(side=tk.LEFT, padx=(0,3))
+        tk.Label(leg, text='外形カット', font=('',8)).pack(side=tk.LEFT)
+        tk.Label(leg,
+                 text='  ※ ダブルクリックでリードイン方向を切替',
+                 font=('', 8), fg='#888').pack(side=tk.RIGHT)
+
+        self._refresh()
+
+    def _refresh(self):
+        self._tv.delete(*self._tv.get_children())
+        for i, item in enumerate(self.plan):
+            is_inner = item['is_inner']
+            leadin   = item.get('leadin', 'inside')
+            ptype    = '穴' if is_inner else '外形'
+            ldlabel  = '← 内側から' if leadin == 'inside' else '→ 外側から'
+            tag      = 'inner' if is_inner else 'outer'
+            self._tv.insert('', 'end',
+                            iid=str(i),
+                            values=(i+1, ptype, ldlabel, item['label']),
+                            tags=(tag,))
+
+    def _selected_idx(self):
+        sel = self._tv.selection()
+        return int(sel[0]) if sel else None
+
+    def _move_up(self):
+        idx = self._selected_idx()
+        if idx is None or idx == 0:
+            return
+        self.plan[idx-1], self.plan[idx] = self.plan[idx], self.plan[idx-1]
+        self._refresh()
+        self._tv.selection_set(str(idx-1))
+        self._tv.see(str(idx-1))
+
+    def _move_down(self):
+        idx = self._selected_idx()
+        if idx is None or idx >= len(self.plan)-1:
+            return
+        self.plan[idx], self.plan[idx+1] = self.plan[idx+1], self.plan[idx]
+        self._refresh()
+        self._tv.selection_set(str(idx+1))
+        self._tv.see(str(idx+1))
+
+    def _toggle_leadin(self):
+        idx = self._selected_idx()
+        if idx is None:
+            return
+        cur = self.plan[idx].get('leadin', 'inside')
+        self.plan[idx]['leadin'] = 'outside' if cur == 'inside' else 'inside'
+        self._refresh()
+        self._tv.selection_set(str(idx))
+
+    def _on_double_click(self, e):
+        self._toggle_leadin()
+
+    def _auto_order(self):
+        from gcode_generator import _hierarchical_order
+        new_plan = []
+        for entry in self.app.dxf_entries:
+            ox = entry.get('offset_x', 0.0)
+            oy = entry.get('offset_y', 0.0)
+            order, inner_flags = _hierarchical_order(entry['paths'], ox, oy)
+            for idx in order:
+                path  = entry['paths'][idx]
+                ptype = '穴' if inner_flags[idx] else '外形'
+                # 既存の leadin 設定を引き継ぐ
+                old = next((p for p in self.plan
+                            if p['entry'] is entry and p['path_idx'] == idx), None)
+                new_plan.append({
+                    'entry':    entry,
+                    'path_idx': idx,
+                    'path':     path,
+                    'is_inner': inner_flags[idx],
+                    'leadin':   old['leadin'] if old else 'inside',
+                    'label':    f"{entry['name']} [{ptype}]",
+                })
+        self.plan = new_plan
+        self._refresh()
+
+    def _apply(self):
+        self.app.apply_cam_plan(self.plan)
+        messagebox.showinfo('適用完了',
+                            f'{len(self.plan)}パスのCAM計画を適用しました。\n'
+                            '「▶ プレビュー」または「💾 保存」で確認できます。')
         self._win.destroy()
 
 

@@ -105,6 +105,118 @@ def generate_gcode(dxf_entries: list, settings: dict) -> str:
 
 
 # ======================================================================
+# cam_plan からGコード生成 (手動順序・リードイン方向対応)
+# ======================================================================
+
+def generate_from_plan(plan: list, settings: dict) -> str:
+    """
+    plan: list of {
+        'entry': dxf_entry,
+        'path': Path,
+        'is_inner': bool,
+        'leadin': 'inside' | 'outside',
+    }
+    """
+    feed_rate       = settings.get('feed_rate', 3000)
+    lead_in_length  = settings.get('lead_in_length', 5.0)
+    lead_out_length = settings.get('lead_out_length', 0.0)
+    kerf_width      = settings.get('kerf_width', 0.0)
+    hot_dist        = float(settings.get('hot_start_distance', 50.0))
+    hot_time        = float(settings.get('hot_start_time', 2.5))
+    hot_pierce      = float(settings.get('hot_pierce_ms',  800))  / 1000.0
+    cold_pierce     = float(settings.get('cold_pierce_ms', 2400)) / 1000.0
+    rapid_speed     = float(settings.get('rapid_speed', 5000.0))
+    fr = int(feed_rate)
+
+    lines = [
+        '; Plasma CAM G-code (手動CAM計画)',
+        f'; Feed: {fr} mm/min  Lead-in: {lead_in_length}mm  Kerf: {kerf_width}mm',
+        '', 'G21', 'G90', 'G94', 'M5', 'G0 X0 Y0', '',
+    ]
+    prev_end = None
+
+    for i, item in enumerate(plan):
+        entry    = item['entry']
+        path     = item['path']
+        is_inner = item['is_inner']
+        leadin   = item.get('leadin', 'inside')  # 'inside' or 'outside'
+        ox = entry.get('offset_x', 0.0)
+        oy = entry.get('offset_y', 0.0)
+
+        def px(x): return x + ox
+        def py(y): return y + oy
+
+        offset_pts = None
+        if kerf_width > 0 and path.closed:
+            offset_pts = compute_offset_points(path, kerf_width, is_inner=is_inner)
+
+        lead_start = _calc_lead_start_dir(
+            path, offset_pts, leadin, lead_in_length, ox, oy)
+
+        # スマートピアシング判定
+        if prev_end is None or lead_start is None:
+            pierce = cold_pierce; label = 'コールド'
+        else:
+            d = math.hypot(lead_start[0]-prev_end[0], lead_start[1]-prev_end[1])
+            t = d / (rapid_speed / 60.0)
+            pierce = hot_pierce if (d <= hot_dist and t <= hot_time) else cold_pierce
+            label  = f'ホット d={d:.0f}mm' if pierce == hot_pierce else f'コールド'
+
+        ptype = '穴' if is_inner else '外形'
+        lines.append(f'; --- Path {i+1}  {ptype}  リードイン:{leadin}  [{label}] ---')
+
+        if offset_pts and len(offset_pts) >= 2:
+            end = _write_offset_path(lines, offset_pts, fr, pierce,
+                                     lead_in_length, lead_out_length,
+                                     is_inner, px, py, lead_start)
+        else:
+            end = _write_original_path(lines, path, fr, pierce,
+                                       lead_in_length, lead_out_length,
+                                       is_inner, px, py, lead_start)
+        lines.append('M5')
+        lines.append('')
+        prev_end = end
+
+    lines += ['G0 X0 Y0', 'M30']
+    return '\n'.join(lines)
+
+
+def _calc_lead_start_dir(path, offset_pts, leadin, lead_len, ox, oy):
+    """
+    leadin='inside'  → lead_start が輪郭の内側（重心方向）
+    leadin='outside' → lead_start が輪郭の外側（重心逆方向）
+    """
+    if lead_len <= 0:
+        return None
+
+    if offset_pts and len(offset_pts) >= 2:
+        sx, sy  = offset_pts[0]
+        all_pts = offset_pts
+    else:
+        sx, sy  = path.segments[0].start
+        all_pts = path.get_display_points()
+
+    if not all_pts:
+        return (sx + ox, sy + oy)
+
+    cx = sum(p[0] for p in all_pts) / len(all_pts)
+    cy = sum(p[1] for p in all_pts) / len(all_pts)
+    dx, dy = cx - sx, cy - sy
+    d = math.hypot(dx, dy)
+    if d < 1e-10:
+        return (sx + ox, sy + oy)
+
+    if leadin == 'inside':
+        # 重心方向（内側）
+        nx, ny = dx/d * lead_len, dy/d * lead_len
+    else:
+        # 重心逆方向（外側）
+        nx, ny = -dx/d * lead_len, -dy/d * lead_len
+
+    return (sx + nx + ox, sy + ny + oy)
+
+
+# ======================================================================
 # 切断順序: 階層検出 + 最近隣
 # ======================================================================
 
