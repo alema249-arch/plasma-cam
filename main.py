@@ -1202,7 +1202,7 @@ class PlasmaCamApp:
         if not messagebox.askyesno('確認', 'Gコードを機械に送信します。\nよろしいですか？'):
             return
 
-        gcode = generate_gcode(self.dxf_entries, settings)
+        gcode = self._build_gcode(settings)
         lines = []
         for l in gcode.split('\n'):
             stripped = l.strip()
@@ -1357,6 +1357,13 @@ class PlasmaCamApp:
             return
         CamEditorWindow(self.root, self.dxf_entries, self)
 
+    def _build_gcode(self, settings=None):
+        """CAM計画を使ってGコードを生成する（全箇所共通）"""
+        if settings is None:
+            settings = self._get_settings()
+        plan = self.get_cam_plan()
+        return generate_from_plan(plan, settings)
+
     def get_cam_plan(self):
         """現在の cam_plan を返す（なければ自動生成）"""
         if hasattr(self, '_cam_plan') and self._cam_plan:
@@ -1394,7 +1401,7 @@ class PlasmaCamApp:
         try:
             settings = self._get_settings()
             plan = self.get_cam_plan()
-            gcode = generate_from_plan(plan, settings) if plan else generate_gcode(self.dxf_entries, settings)
+            gcode = self._build_gcode(settings)
         except Exception as e:
             messagebox.showerror('エラー', str(e))
             return
@@ -1483,7 +1490,7 @@ class PlasmaCamApp:
         try:
             settings = self._get_settings()
             plan = self.get_cam_plan()
-            gcode = generate_from_plan(plan, settings) if plan else generate_gcode(self.dxf_entries, settings)
+            gcode = self._build_gcode(settings)
         except ValueError:
             messagebox.showerror('エラー', '設定値に無効な数値があります')
             return
@@ -1656,7 +1663,7 @@ class PlasmaCamApp:
         if not filename:
             return
         try:
-            gcode = gcode_override if gcode_override else generate_gcode(self.dxf_entries, settings)
+            gcode = gcode_override if gcode_override else self._build_gcode(settings)
             with open(filename, 'w') as f:
                 f.write(gcode)
             messagebox.showinfo('完了', f'Gコードを保存しました:\n{filename}')
