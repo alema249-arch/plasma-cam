@@ -136,10 +136,25 @@ class PlasmaCamApp:
         self._init_canvas()
         self._connect_canvas_events()
 
-        # ── 列2: 設定 ────────────────────────────────────
+        # ── 列2: 設定（スクロール対応） ───────────────────────
         col2 = ttk.LabelFrame(h_pane, text='⚙ 設定')
         h_pane.add(col2, minsize=200, stretch='never')
-        t1 = col2   # _build_settings_tab に渡す
+
+        _cv2  = tk.Canvas(col2, borderwidth=0, highlightthickness=0)
+        _sb2  = ttk.Scrollbar(col2, orient=tk.VERTICAL, command=_cv2.yview)
+        _cv2.configure(yscrollcommand=_sb2.set)
+        _sb2.pack(side=tk.RIGHT, fill=tk.Y)
+        _cv2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        t1 = ttk.Frame(_cv2)
+        _wid2 = _cv2.create_window((0, 0), window=t1, anchor='nw')
+
+        def _cfg2(e): _cv2.configure(scrollregion=_cv2.bbox('all'))
+        def _cw2(e):  _cv2.itemconfig(_wid2, width=e.width)
+        def _mw2(e):  _cv2.yview_scroll(int(-1*(e.delta/120)), 'units')
+        t1.bind('<Configure>', _cfg2)
+        _cv2.bind('<Configure>', _cw2)
+        _cv2.bind('<Enter>', lambda e: _cv2.bind_all('<MouseWheel>', _mw2))
+        _cv2.bind('<Leave>', lambda e: _cv2.unbind_all('<MouseWheel>'))
 
         # ── 列3: 機械制御 ─────────────────────────────────
         col3 = ttk.LabelFrame(h_pane, text='🎮 機械制御')
