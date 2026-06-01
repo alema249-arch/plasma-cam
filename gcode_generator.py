@@ -51,10 +51,26 @@ def generate_gcode(dxf_entries: list, settings: dict) -> str:
         def px(x): return x + ox
         def py(y): return y + oy
 
-        # 常に内外判定してから「内側(穴)→外側」の順に並べ替え
+        # 内外判定 → 面積小さい順(穴優先) → 外周は必ず最後
         inner_flags = compute_path_types(paths)
+
+        def _path_area(p):
+            pts = p.get_display_points()
+            if len(pts) < 3:
+                return 0.0
+            # Shoelace formula
+            n = len(pts)
+            return abs(sum(
+                pts[i][0]*pts[(i+1)%n][1] - pts[(i+1)%n][0]*pts[i][1]
+                for i in range(n)
+            )) / 2.0
+
+        # キー: (is_outer=0/1, area)  → 穴を先に、外周は面積大きい順で後
         order = sorted(range(len(paths)),
-                       key=lambda idx: (0 if inner_flags[idx] else 1))
+                       key=lambda idx: (
+                           1 if not inner_flags[idx] else 0,   # 穴(0)→外周(1)
+                           _path_area(paths[idx])               # 小さい穴から
+                       ))
         paths_sorted = [paths[idx]       for idx in order]
         flags_sorted = [inner_flags[idx] for idx in order]
 
@@ -118,14 +134,9 @@ def _path_endpoints(path, offset_pts, lead_in_length, lead_out_length,
         if lead_in_length > 0:
             cx = sum(p[0] for p in offset_pts) / len(offset_pts)
             cy = sum(p[1] for p in offset_pts) / len(offset_pts)
-            if is_inner:
-                # 内側(穴): 重心→始点 方向 → lead_start が穴の内側に入る ✓
-                dx = start[0] - cx
-                dy = start[1] - cy
-            else:
-                # 外側: 始点→重心 方向（内向き）→ lead_start が材料の外側に出る ✓
-                dx = cx - start[0]
-                dy = cy - start[1]
+            # 内側・外側ともに「重心→始点」方向 → lead_start は常に輪郭の内側から
+            dx = start[0] - cx
+            dy = start[1] - cy
             d  = math.hypot(dx, dy)
             ld = (dx / d, dy / d) if d > 1e-10 else (1.0, 0.0)
             g0 = (_px(start[0] - ld[0] * lead_in_length),
@@ -173,14 +184,9 @@ def _generate_offset_path(lines, offset_pts, fr, pierce_delay,
     if lead_in_length > 0:
         cx = sum(p[0] for p in offset_pts) / len(offset_pts)
         cy = sum(p[1] for p in offset_pts) / len(offset_pts)
-        if is_inner:
-            # 内側(穴): 重心→始点方向 → lead_start が穴の内側 ✓
-            dx = start[0] - cx
-            dy = start[1] - cy
-        else:
-            # 外側: 始点→重心方向（内向き）→ lead_start が材料の外側 ✓
-            dx = cx - start[0]
-            dy = cy - start[1]
+        # 内側・外側ともに「重心→始点」方向 → lead_start は輪郭の内側から
+        dx = start[0] - cx
+        dy = start[1] - cy
         d = math.hypot(dx, dy)
         lead_dir = (dx / d, dy / d) if d > 1e-10 else (1.0, 0.0)
         lead_start = (start[0] - lead_dir[0] * lead_in_length,
@@ -215,11 +221,10 @@ def _generate_original_path(lines, path, fr, pierce_delay,
     if lead_in_length > 0:
         if path.closed:
             if is_inner:
-                # 内側: 重心→始点方向 → lead_start が穴の内側 ✓
+                # 内側・外側ともに「重心→始点」方向 → lead_start は輪郭の内側から
                 lead_dir = _centroid_dir(path)
             else:
-                # 外側: 始点→重心方向（内向き）→ lead_start が材料外側 ✓
-                lead_dir = _centroid_dir_outward(path)
+                lead_dir = _centroid_dir(path)
         else:
             lead_dir = _seg_direction_at_start(path.segments[0])
         lead_start = (
