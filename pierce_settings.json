@@ -1,0 +1,34 @@
+{
+  "settings": {
+    "feed_rate": "1400.0",
+    "kerf_width": "1.2",
+    "lead_in_length": "2.5",
+    "lead_in_type": "line",
+    "lead_out_length": "2.5",
+    "pierce_delay": "2.5",
+    "post_cut_delay": "2.0",
+    "pierce_z_height": "2.0",
+    "cut_z_height": "1.5",
+    "home_z_clearance": "10.0"
+  },
+  "presets": {
+    "標準": {
+      "hot_start_distance": "50.0",
+      "hot_start_time": "2.5",
+      "hot_pierce_ms": "800",
+      "cold_pierce_ms": "2400"
+    },
+    "夏用": {
+      "hot_start_distance": "60.0",
+      "hot_start_time": "3.0",
+      "hot_pierce_ms": "600",
+      "cold_pierce_ms": "2000"
+    },
+    "冬用": {
+      "hot_start_distance": "40.0",
+      "hot_start_time": "2.0",
+      "hot_pierce_ms": "1000",
+      "cold_pierce_ms": "3000"
+    }
+  }
+}
