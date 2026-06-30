@@ -6,6 +6,7 @@ import matplotlib.patches as mpatches
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os
 import threading
+import queue
 import time
 import re
 import math
@@ -44,6 +45,8 @@ class PlasmaCamApp:
         self.torch_x = 0.0
         self.torch_y = 0.0
         self.serial_lock = threading.Lock()
+        self._tx_queue = queue.Queue()   # GUIスレッドはここに積むだけ
+        self.cut_from_current_pos = tk.BooleanVar(value=False)  # 現在位置を起点に切断
 
         # drag state
         self._drag_mode = None
@@ -207,6 +210,20 @@ class PlasmaCamApp:
         cmd_entry.bind('<Up>',     lambda e: self._cmd_history(-1))
         cmd_entry.bind('<Down>',   lambda e: self._cmd_history(1))
 
+        def _on_paste(e):
+            try:
+                text = self.root.clipboard_get()
+            except tk.TclError:
+                return
+            lines = [l.strip() for l in text.replace('\r', '\n').split('\n') if l.strip()]
+            if len(lines) <= 1:
+                return  # 1行なら通常のペーストに任せる
+            self.manual_cmd.set('\n'.join(lines))
+            self.root.after(10, self._send_manual_cmd)
+            return 'break'  # デフォルトのペースト動作をキャンセル
+
+        cmd_entry.bind('<<Paste>>', _on_paste)
+
         btn_row = ttk.Frame(cmd_frm)
         btn_row.pack(fill=tk.X, padx=4, pady=(0, 4))
         ttk.Button(btn_row, text='送信',
@@ -240,6 +257,36 @@ class PlasmaCamApp:
         con_sb.config(command=self.console.yview)
         con_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.console.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        # DISABLED状態でもテキスト選択・コピー・ペーストを可能にする
+        self.console.bind('<Control-c>', lambda e: self.console.event_generate('<<Copy>>'))
+        self.console.bind('<Control-a>', lambda e: (
+            self.console.tag_add(tk.SEL, '1.0', tk.END),
+            self.console.mark_set(tk.INSERT, '1.0'),
+            self.console.see(tk.INSERT), 'break'))
+        self.console.bind('<Button-1>', lambda e: self.console.focus_set())
+        # Ctrl+V でクリップボードのテキストをコマンド入力欄に転送して送信
+        def _console_paste(e=None):
+            try:
+                text = self.root.clipboard_get()
+            except tk.TclError:
+                return 'break'
+            self.manual_cmd.set(text.strip())
+            self.root.after(10, self._send_manual_cmd)
+            return 'break'
+        self.console.bind('<Control-v>', _console_paste)
+
+        # 右クリックコンテキストメニュー
+        ctx_menu = tk.Menu(self.console, tearoff=0)
+        ctx_menu.add_command(label='コピー',     command=lambda: self.console.event_generate('<<Copy>>'))
+        ctx_menu.add_command(label='全選択',     command=lambda: (
+            self.console.tag_add(tk.SEL, '1.0', tk.END),
+            self.console.mark_set(tk.INSERT, '1.0')))
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label='貼り付けて送信', command=_console_paste)
+        def _show_ctx(e):
+            self.console.focus_set()
+            ctx_menu.tk_popup(e.x_root, e.y_root)
+        self.console.bind('<Button-3>', _show_ctx)
 
         # PanedWindow への参照を保持（レイアウト保存用）
         self._h_pane = h_pane
@@ -261,6 +308,10 @@ class PlasmaCamApp:
 
         self._build_settings_tab(t1)
         self._build_control_tab(t2)
+
+        # 停止ショートカットキー（Del / Esc）
+        self.root.bind('<Delete>', lambda e: self._soft_reset())
+        self.root.bind('<Escape>', lambda e: self._soft_reset())
 
     # ------------------------------------------------------------------ canvas
     def _init_canvas(self):
@@ -329,7 +380,6 @@ class PlasmaCamApp:
                 text=f'→ X={x:.3f}  Y={y:.3f}')
             if self.ser and self.ser.is_open:
                 self._send_serial(f'G0 X{x:.3f} Y{y:.3f}')
-                self._log(f'>>> 🎯 G0 X{x:.3f} Y{y:.3f}', 'send')
             else:
                 self._goto_pos_label.config(
                     text=f'⚠ 未接続  X={x:.3f}  Y={y:.3f}')
@@ -637,6 +687,9 @@ class PlasmaCamApp:
         self.lead_out_length  = tk.StringVar(value=s.get('lead_out_length',  '3.0'))
         self.pierce_delay     = tk.StringVar(value=s.get('pierce_delay',     '0.5'))
         self.post_cut_delay   = tk.StringVar(value=s.get('post_cut_delay',   '0.0'))
+        self.pierce_z_height  = tk.StringVar(value=s.get('pierce_z_height',  '0.5'))
+        self.cut_z_height     = tk.StringVar(value=s.get('cut_z_height',     '1.5'))
+        self.home_z_clearance = tk.StringVar(value=s.get('home_z_clearance', '10.0'))
 
         g(sf, 'カット速度(mm/min)',  self.feed_rate,       0, 0)
         g(sf, 'カーフ幅(mm)',        self.kerf_width,      0, 1)
@@ -644,13 +697,27 @@ class PlasmaCamApp:
         g(sf, 'リードアウト(mm)',    self.lead_out_length, 1, 1)
         g(sf, 'ピアス待機(秒)',      self.pierce_delay,    2, 0)
         g(sf, '切断後待機(秒)',      self.post_cut_delay,  2, 1)
+        g(sf, 'ピアス時Z上昇量(mm)', self.pierce_z_height,  3, 0)
+        g(sf, 'ホーム退避Z(mm)',    self.home_z_clearance, 3, 1)
 
         li_f = ttk.Frame(sf)
-        li_f.grid(row=3, column=0, columnspan=4, sticky='w', padx=6, pady=2)
+        li_f.grid(row=4, column=0, columnspan=4, sticky='w', padx=6, pady=(4, 2))
         self.lead_in_type = tk.StringVar(value=s.get('lead_in_type', 'line'))
         ttk.Label(li_f, text='リードイン種類:', font=('',8)).pack(side=tk.LEFT)
         ttk.Radiobutton(li_f, text='直線', variable=self.lead_in_type, value='line').pack(side=tk.LEFT)
         ttk.Radiobutton(li_f, text='円弧', variable=self.lead_in_type, value='arc').pack(side=tk.LEFT)
+
+        # Z軸説明ラベル
+        z_note = ttk.Label(sf,
+            text='※ ピアス時に現在位置から上昇→待機→元の切断高さに戻る（0で無効）',
+            font=('', 7), foreground='#777')
+        z_note.grid(row=5, column=0, columnspan=4, sticky='w', padx=6, pady=(0, 4))
+
+        # 設定保存ボタン
+        save_row = ttk.Frame(sf)
+        save_row.grid(row=6, column=0, columnspan=4, sticky='ew', padx=4, pady=(2, 4))
+        ttk.Button(save_row, text='💾 設定を保存',
+                   command=self._save_settings_now).pack(fill=tk.X)
 
         # プリセット（コンパクト版）
         pf = ttk.LabelFrame(parent, text='プリセット')
@@ -725,6 +792,22 @@ class PlasmaCamApp:
         ttk.Button(btn_row_gc, text='💾 保存',
                    command=self.save_gcode).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
 
+        # CAM設定ファイル 保存/読み込み
+        cam_io_row = ttk.Frame(parent)
+        cam_io_row.pack(fill=tk.X, padx=5, pady=(0, 2))
+        ttk.Button(cam_io_row, text='📤 CAM設定を書き出し',
+                   command=self.export_cam_settings).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        ttk.Button(cam_io_row, text='📥 CAM設定を読み込み',
+                   command=self.import_cam_settings).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
+
+        # CAM計画（切断順序・リードイン方向）保存/読み込み
+        cam_plan_row = ttk.Frame(parent)
+        cam_plan_row.pack(fill=tk.X, padx=5, pady=(0, 2))
+        ttk.Button(cam_plan_row, text='💾 CAM計画を保存',
+                   command=self.save_cam_plan).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
+        ttk.Button(cam_plan_row, text='📂 CAM計画を読み込み',
+                   command=self.load_cam_plan).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
+
         btn_row_view = ttk.Frame(parent)
         btn_row_view.pack(fill=tk.X, padx=5, pady=(0, 2))
         ttk.Button(btn_row_view, text='🔭 全体を表示',
@@ -793,12 +876,14 @@ class PlasmaCamApp:
         if name not in self._presets:
             return
         p = self._presets[name]
-        if 'feed_rate'      in p: self.feed_rate.set(p['feed_rate'])
-        if 'kerf_width'     in p: self.kerf_width.set(p['kerf_width'])
-        if 'lead_in_length' in p: self.lead_in_length.set(p['lead_in_length'])
-        if 'lead_out_length'in p: self.lead_out_length.set(p['lead_out_length'])
-        if 'pierce_delay'   in p: self.pierce_delay.set(p['pierce_delay'])
-        if 'post_cut_delay' in p: self.post_cut_delay.set(p['post_cut_delay'])
+        if 'feed_rate'       in p: self.feed_rate.set(p['feed_rate'])
+        if 'kerf_width'      in p: self.kerf_width.set(p['kerf_width'])
+        if 'lead_in_length'  in p: self.lead_in_length.set(p['lead_in_length'])
+        if 'lead_out_length' in p: self.lead_out_length.set(p['lead_out_length'])
+        if 'pierce_delay'    in p: self.pierce_delay.set(p['pierce_delay'])
+        if 'post_cut_delay'  in p: self.post_cut_delay.set(p['post_cut_delay'])
+        if 'pierce_z_height' in p: self.pierce_z_height.set(p['pierce_z_height'])
+        if 'cut_z_height'    in p: self.cut_z_height.set(p['cut_z_height'])
 
     def _save_preset(self):
         from tkinter.simpledialog import askstring
@@ -814,6 +899,8 @@ class PlasmaCamApp:
             'lead_out_length': self.lead_out_length.get(),
             'pierce_delay':    self.pierce_delay.get(),
             'post_cut_delay':  self.post_cut_delay.get(),
+            'pierce_z_height': self.pierce_z_height.get(),
+            'cut_z_height':    self.cut_z_height.get(),
         }
         try:
             raw = {k: str(v) for k, v in self._get_settings().items()}
@@ -891,7 +978,7 @@ class PlasmaCamApp:
         z_step_row.pack(fill=tk.X, padx=6, pady=(0, 2))
         ttk.Label(z_step_row, text='Z :', foreground='#00897B',
                   font=('', 9, 'bold')).pack(side=tk.LEFT)
-        self.jog_step_z = tk.StringVar(value='1')
+        self.jog_step_z = tk.StringVar(value='0.5')
         ttk.Entry(z_step_row, textvariable=self.jog_step_z, width=6).pack(side=tk.LEFT, padx=3)
         ttk.Button(z_step_row, text='-1',  width=4,
                    command=lambda: self._change_step_z(-1)).pack(side=tk.LEFT, padx=1)
@@ -946,14 +1033,30 @@ class PlasmaCamApp:
                    command=self._set_origin).pack(fill=tk.X, padx=5, pady=2)
 
         btn_row = ttk.Frame(mf)
-        btn_row.pack(fill=tk.X, padx=5, pady=(2, 4))
+        btn_row.pack(fill=tk.X, padx=5, pady=(2, 2))
         ttk.Button(btn_row, text='一時停止  (!)',
                    command=self._feed_hold).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         ttk.Button(btn_row, text='再開  (~)',
                    command=self._resume).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
+        # 停止ボタン（Ctrl+X ソフトリセット）
+        stop_f = tk.Frame(mf, bg='#b71c1c')
+        stop_f.pack(fill=tk.X, padx=5, pady=(0, 4))
+        self._stop_reset_btn = tk.Button(
+            stop_f, text='⏹ 停止  (Del / Esc)',
+            bg='#c62828', fg='white', activebackground='#8b0000',
+            font=('Yu Gothic UI', 10, 'bold'),
+            relief='flat', cursor='hand2',
+            command=self._soft_reset)
+        self._stop_reset_btn.pack(fill=tk.X, padx=1, pady=1)
+
         sf2 = ttk.LabelFrame(parent, text='Gコード送信')
         sf2.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+        ttk.Checkbutton(
+            sf2, text='現在のトーチ位置を起点に切断する (送信前にG92 X0 Y0)',
+            variable=self.cut_from_current_pos
+        ).pack(fill=tk.X, padx=5, pady=(2, 0))
 
         self.send_btn = ttk.Button(sf2, text='Gコードを機械に送信',
                                    command=self._send_gcode, state=tk.DISABLED)
@@ -1015,7 +1118,6 @@ class PlasmaCamApp:
             return
         _, _, sx, sy = self._path_list_data[sel[0]]
         self._send_serial(f'G0 X{sx:.3f} Y{sy:.3f}')
-        self._log(f'>>> 🎯 G0 X{sx:.3f} Y{sy:.3f}', 'send')
 
     def _update_info_label(self):
         if not self.dxf_entries:
@@ -1115,7 +1217,7 @@ class PlasmaCamApp:
     def _connect_thread(self, port):
         try:
             baud = int(self.baud_var.get())
-            ser = serial.Serial(port, baud, timeout=2)
+            ser = serial.Serial(port, baud, timeout=0.2)
             time.sleep(2)
             ser.flushInput()
             ser.write(b'\r\n')
@@ -1173,17 +1275,29 @@ class PlasmaCamApp:
         self.progress['value'] = 0
 
     def _send_serial(self, cmd: str):
+        """GUIスレッドからノンブロッキング送信 — キューに積むだけ"""
         if not self.ser or not self.ser.is_open:
             return
-        with self.serial_lock:
-            self.ser.write((cmd.strip() + '\n').encode())
+        self._tx_queue.put(('line', cmd.strip()))
         self._log_terminal(f'>>> {cmd.strip()}', 'send')
 
     def _send_realtime(self, byte: bytes):
+        """リアルタイム1バイトコマンド（!～など）— 即時送信・ほぼノンブロッキング"""
         if not self.ser or not self.ser.is_open:
             return
         with self.serial_lock:
             self.ser.write(byte)
+
+    def _flush_tx_queue(self):
+        """ポーリングスレッドのみが呼ぶ — キューのコマンドをシリアルに書き出す"""
+        while not self._tx_queue.empty():
+            try:
+                kind, data = self._tx_queue.get_nowait()
+                self.ser.write((data + '\n').encode())
+            except queue.Empty:
+                break
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ terminal log (コンソール表示に統合)
     def _log_terminal(self, text, tag=None):
@@ -1245,26 +1359,41 @@ class PlasmaCamApp:
 
     # ------------------------------------------------------------------ position polling
     def _poll_thread(self):
+        """シリアルI/Oを一手に担うスレッド。GUIスレッドは書き込まない。"""
+        rx_buf = ''
         while self.polling and self.ser and self.ser.is_open:
-            if not self.streaming:
-                try:
-                    with self.serial_lock:
-                        # バッファに溜まった未読データを先に消化
-                        pending = self.ser.in_waiting
-                        if pending > 0:
-                            raw = self.ser.read(pending).decode('utf-8', errors='ignore')
-                            for line in raw.splitlines():
-                                line = line.strip()
-                                if line:
-                                    self._handle_grbl_line(line)
-                        # 状態ポーリング
-                        self.ser.write(b'?')
-                        resp = self.ser.readline().decode('utf-8', errors='ignore').strip()
-                    if resp:
-                        self._handle_grbl_line(resp)
-                except Exception:
-                    pass
-            time.sleep(0.5)
+            try:
+                # ── ストリーミング中はポーリングもTX送信も行わない ──────
+                # _stream_thread が serial_lock でシリアルを占有しているため
+                # _flush_tx_queue（serial_lock なし）と競合してはいけない
+                if self.streaming:
+                    time.sleep(0.05)
+                    continue
+
+                # ── TX キューを全部送信 ──────────────────────
+                self._flush_tx_queue()
+
+                # ── 状態ポーリング ───────────────────────────
+                self.ser.write(b'?')
+
+                # 受信データをためてから処理（ノンブロッキング read）
+                time.sleep(0.08)
+                waiting = self.ser.in_waiting
+                if waiting:
+                    rx_buf += self.ser.read(waiting).decode('utf-8', errors='ignore')
+
+                # 改行で切り出して処理
+                while '\n' in rx_buf:
+                    line, rx_buf = rx_buf.split('\n', 1)
+                    line = line.strip()
+                    if line:
+                        self._handle_grbl_line(line)
+
+            except Exception:
+                rx_buf = ''
+
+            time.sleep(0.42)
+
 
     def _parse_position(self, resp):
         m = re.search(r'[MW]Pos:([-\d.]+),([-\d.]+),?([-\d.]*)', resp)
@@ -1291,7 +1420,7 @@ class PlasmaCamApp:
             val = max(0.01, val)
             self.jog_step_z.set(f'{val:.0f}' if val >= 1 else f'{val:.2f}')
         except ValueError:
-            self.jog_step_z.set('1')
+            self.jog_step_z.set('0.5')
 
     def _change_offset(self, axis, delta):
         idx = self._selected_entry_idx()
@@ -1316,10 +1445,19 @@ class PlasmaCamApp:
         self._draw_paths()
 
     # ------------------------------------------------------------------ jog / machine
+    _JOG_MIN_INTERVAL = 0.15   # 最小ジョグ間隔(秒) — これより速い連打は無視
+
     def _jog(self, dx, dy, dz=0):
         if not self.ser or not self.ser.is_open:
             messagebox.showwarning('警告', '先に接続してください')
             return
+
+        # 連打レート制限
+        now = time.monotonic()
+        if now - getattr(self, '_last_jog_time', 0) < self._JOG_MIN_INTERVAL:
+            return
+        self._last_jog_time = now
+
         step = float(self.jog_step.get())
         speed = int(float(self.jog_speed.get()))
         axis = ''
@@ -1328,7 +1466,6 @@ class PlasmaCamApp:
         if dy:
             axis += f' Y{dy * step:.3f}'
         if dz:
-            # Z軸は専用ステップを使用
             try:
                 z_step = float(self.jog_step_z.get())
             except (ValueError, AttributeError):
@@ -1381,6 +1518,20 @@ class PlasmaCamApp:
         self.send_btn.config(state=tk.NORMAL)
         self.progress['value'] = 0
 
+    def _find_first_xy(self, lines):
+        """Gコード行リストから最初のX,Y両方を含む行のXY座標を返す。
+        見つからなければ (None, None)。"""
+        x_re = re.compile(r'X(-?\d+\.?\d*)')
+        y_re = re.compile(r'Y(-?\d+\.?\d*)')
+        for line in lines:
+            if not line or line.startswith('$') or line.startswith(';'):
+                continue
+            mx = x_re.search(line)
+            my = y_re.search(line)
+            if mx and my:
+                return float(mx.group(1)), float(my.group(1))
+        return None, None
+
     # ------------------------------------------------------------------ G-code streaming
     def _send_gcode(self):
         if not self.dxf_entries:
@@ -1410,6 +1561,32 @@ class PlasmaCamApp:
             if stripped:
                 lines.append(stripped)
 
+        # ストリーミング開始前にTXキューを空にする（残留ジョグコマンドを捨てる）
+        while not self._tx_queue.empty():
+            try: self._tx_queue.get_nowait()
+            except queue.Empty: break
+
+        # 現在位置を起点に切断する場合:
+        # Gコード内の最初のXY移動先座標を読み取り、
+        # 「現在のトーチ物理位置 = その座標」となるようG92で作業原点を設定する。
+        # 座標値は一切変更しないのでX/Yがマイナスになる問題が発生しない。
+        if self.cut_from_current_pos.get():
+            fx, fy = self._find_first_xy(lines)
+            if fx is not None:
+                # 先頭に G92 を追加（現在トーチ位置 = DXF最初の切断点）
+                lines = [f'G92 X{fx:.3f} Y{fy:.3f}'] + lines
+                # 末尾の「G0 X0 Y0」（ホーム移動）の前に G92.1 を挿入する。
+                # G92 が有効なままだと G0 X0 Y0 がマシン座標の負の位置に移動し
+                # ソフトリミット error:15 が発生するため、G92 オフセットを解除してから
+                # 真のマシン原点へ戻す。
+                for i in range(len(lines) - 1, -1, -1):
+                    if lines[i].strip().upper() == 'G0 X0 Y0':
+                        lines.insert(i, 'G92.1')
+                        break
+                self.torch_x = fx
+                self.torch_y = fy
+                self.root.after(0, lambda: self._update_torch_display(fx, fy))
+
         # GRBLアラーム解除 ($X) を先頭に追加
         lines = ['$X', ''] + lines
         self.streaming = True
@@ -1425,8 +1602,15 @@ class PlasmaCamApp:
         buf_used   = 0      # バッファ使用量(バイト)
         line_lens  = []     # 各行のバイト数
         error_msg  = None
+        timeout_count = 0   # 連続タイムアウト回数
 
-        self.ser.timeout = 5  # タイムアウトを長めに
+        self.ser.timeout = 2  # ストリーミング中は少し長め
+        self.ser.reset_input_buffer()  # 残留データをクリア（ポーリング応答など）
+
+        # 送信するGコードの先頭20行をコンソールに表示（デバッグ用）
+        preview = '\n'.join(f'  [{i+1}] {l}' for i, l in enumerate(lines[:20]))
+        self.root.after(0, lambda p=preview:
+                        self._log(f'📤 送信開始 (全{total}行):\n{p}', 'info'))
 
         try:
             while ack_count < total:
@@ -1451,30 +1635,72 @@ class PlasmaCamApp:
                     resp = self.ser.readline().decode('utf-8', errors='ignore').strip()
 
                 if not resp:
+                    timeout_count += 1
+                    waiting = self.ser.in_waiting
+                    if timeout_count == 5:
+                        self.root.after(0, lambda n=ack_count, s=sent_count, w=waiting:
+                                        self._log(
+                                            f'⚠️ GRBL応答なし(10秒): ok受信済={n}件, 送信済={s}行, '
+                                            f'受信バッファ={w}bytes', 'error'))
+                    elif timeout_count == 15:
+                        # 30秒経っても応答なし → 強制停止
+                        error_msg = f'GRBL応答タイムアウト(30秒): ok受信={ack_count}/{total}行'
+                        self.root.after(0, lambda n=ack_count, t=total:
+                                        self._log(
+                                            f'🔴 タイムアウト強制停止: ok受信={n}/{t}行\n'
+                                            f'  → USBケーブルまたはGRBL接続を確認してください', 'error'))
+                        break
                     continue
+                timeout_count = 0
 
-                if resp.lower().startswith('ok'):
+                r_low = resp.lower()
+
+                if r_low.startswith('ok'):
                     if line_lens:
                         buf_used -= line_lens.pop(0)
                     ack_count += 1
                     pct = int(ack_count / total * 100)
                     self.root.after(0, lambda v=pct: self.progress.configure(value=v))
+                    # 節目ごとに進捗をコンソールに表示
+                    if ack_count % 50 == 0 or ack_count == total:
+                        self.root.after(0, lambda n=ack_count, t=total:
+                                        self._log(f'  ✓ {n}/{t} 行完了', 'info'))
 
-                elif resp.lower().startswith('error'):
+                elif r_low.startswith('error'):
                     err_line = lines[ack_count] if ack_count < total else '?'
-                    error_msg = f'コマンド: {err_line}\n応答: {resp}'
-                    self.root.after(0, lambda r=resp, l=err_line:
-                                    self._log(f'❌ {l}  →  {r}', 'error'))
+                    ctx_start = max(0, ack_count - 2)
+                    ctx_end   = min(total, ack_count + 3)
+                    ctx = '\n'.join(
+                        f'  {">>>" if i == ack_count else "   "} [{i+1}] {lines[i]}'
+                        for i in range(ctx_start, ctx_end))
+                    error_msg = (f'行 {ack_count+1}: {err_line}\n'
+                                 f'エラー: {resp}\n\n'
+                                 f'前後のコマンド:\n{ctx}')
+                    self.root.after(0, lambda r=resp, l=err_line, n=ack_count+1:
+                                    self._log(f'❌❌❌ 行{n}でエラー: {l}  →  {r}', 'error'))
+                    break
+
+                elif 'alarm' in r_low:
+                    # ALARMはGRBLを即ロックする → error:9で後続コマンドが全滅するため停止
+                    error_msg = f'GRBL ALARM: {resp}\n行 {ack_count+1} 付近で発生'
+                    self.root.after(0, lambda r=resp, n=ack_count+1:
+                                    self._log(f'🔴🔴🔴 ALARM発生 (行{n}付近): {r}', 'error'))
                     break
 
                 elif resp:
                     self.root.after(0, lambda r=resp: self._log(f'<<< {r}', 'recv'))
 
         except Exception as e:
-            error_msg = str(e)
+            error_msg = f'例外エラー: {e}'
+            self.root.after(0, lambda m=str(e):
+                            self._log(f'💥 例外: {m}', 'error'))
         finally:
             self.streaming = False
-            if error_msg:
+            completed = not error_msg
+            if completed:
+                self.root.after(0, lambda:
+                                self._log(f'✅ 送信完了 (全{total}行)', 'info'))
+            else:
                 self.root.after(0, lambda m=error_msg:
                                 messagebox.showerror('GRBLエラー', m))
             self.root.after(0, lambda: self.send_btn.config(state=tk.NORMAL))
@@ -1541,6 +1767,9 @@ class PlasmaCamApp:
             'lead_out_length':  float(self.lead_out_length.get()),
             'pierce_delay':     float(self.pierce_delay.get()),
             'post_cut_delay':   float(self.post_cut_delay.get()),
+            'pierce_z_height':  float(self.pierce_z_height.get()),
+            'cut_z_height':     float(self.cut_z_height.get()),
+            'home_z_clearance': float(self.home_z_clearance.get()),
         }
 
     # ------------------------------------------------------------------ CAM editor
@@ -1600,13 +1829,76 @@ class PlasmaCamApp:
             messagebox.showerror('エラー', str(e))
             return
 
-        # Gコードからトーチの移動リストを解析
-        moves = self._parse_gcode_moves(gcode)
+        # パスセグメントから直接アニメーション用移動リストを構築（アーク対応）
+        moves = self._build_moves_from_paths(plan)
+        if not moves:
+            # フォールバック: Gコードパース
+            moves = self._parse_gcode_moves(gcode)
         if not moves:
             messagebox.showwarning('警告', '移動データがありません')
             return
 
         SimWindow(self.root, moves, self.dxf_entries)
+
+    def _build_moves_from_paths(self, plan):
+        """パスセグメントから直接アニメーション用移動リストを構築。
+        アーク（R部）を正確に補間する。リードインも含む。"""
+        from kerf_offset import compute_offset_points
+        from gcode_generator import _calc_lead_start_dir
+        try:
+            kerf       = float(self.kerf_width.get())
+            lead_in    = float(self.lead_in_length.get())
+        except Exception:
+            kerf, lead_in = 0.0, 0.0
+
+        moves = []
+
+        for item in plan:
+            entry    = item['entry']
+            path     = item['path']
+            is_inner = item.get('is_inner', False)
+            leadin   = item.get('leadin', 'inside')
+            ox = entry.get('offset_x', 0.0)
+            oy = entry.get('offset_y', 0.0)
+
+            # カーフ補正ありでも弧を保持するため高解像度で点列を取得
+            off_pts_raw = None
+            use_offset  = False
+            if kerf > 0 and path.closed:
+                off_pts_raw = compute_offset_points(path, kerf, is_inner=is_inner, resolution=64)
+                if off_pts_raw and len(off_pts_raw) >= 2:
+                    pts = [(p[0] + ox, p[1] + oy) for p in off_pts_raw]
+                    use_offset = True
+
+            if not use_offset:
+                raw = path.get_display_points(resolution=72)
+                pts = [(p[0] + ox, p[1] + oy) for p in raw]
+
+            if not pts:
+                continue
+
+            # リードイン始点を計算してアニメーションに反映
+            lead_start = _calc_lead_start_dir(
+                path, off_pts_raw, leadin, lead_in, ox, oy)
+
+            sx, sy = pts[0]
+            if lead_start and lead_in > 0:
+                # 早送り → リードイン始点
+                moves.append({'x': lead_start[0], 'y': lead_start[1],
+                              'rapid': True, 'torch': False})
+                # トーチ点火 → リードイン（切断速度で移動）
+                moves.append({'x': sx, 'y': sy, 'rapid': False, 'torch': True})
+            else:
+                # リードインなし: 早送りで切断開始点へ
+                moves.append({'x': sx, 'y': sy, 'rapid': True, 'torch': False})
+
+            # 切断（トーチON）
+            for p in pts[1:]:
+                moves.append({'x': p[0], 'y': p[1], 'rapid': False, 'torch': True})
+
+            cur_x, cur_y = pts[-1]
+
+        return moves
 
     def _parse_gcode_moves(self, gcode):
         """GコードをパースしてMoveリストに変換（G2/G3アーク補間対応）
@@ -1664,7 +1956,8 @@ class PlasmaCamApp:
                         if ea >= sa:
                             ea -= 2 * math.pi
                     arc_len = abs(ea - sa) * r
-                    steps = max(6, int(arc_len / 1.5))
+                    # 0.3mm 刻みで補間（短いアークも滑らかに描画）
+                    steps = max(12, int(arc_len / 0.3))
                     for k in range(1, steps + 1):
                         angle = sa + (ea - sa) * k / steps
                         moves.append({
@@ -1890,16 +2183,18 @@ class PlasmaCamApp:
         cmd = self.manual_cmd.get().strip()
         if not cmd:
             return
-        # 履歴に追加
-        if not self._cmd_hist or self._cmd_hist[-1] != cmd:
-            self._cmd_hist.append(cmd)
-        self._cmd_hist_idx = len(self._cmd_hist)
         self.manual_cmd.set('')
-        self._log(f'>>> {cmd}', 'send')
-        if not self.ser or not self.ser.is_open:
-            self._log('  ⚠ 未接続', 'error')
-            return
-        self._send_serial(cmd)
+        # 複数行ペースト対応（改行で分割して1行ずつ送信）
+        lines = [l.strip() for l in cmd.replace('\r', '\n').split('\n') if l.strip()]
+        for line in lines:
+            if not self._cmd_hist or self._cmd_hist[-1] != line:
+                self._cmd_hist.append(line)
+            self._cmd_hist_idx = len(self._cmd_hist)
+            if not self.ser or not self.ser.is_open:
+                self._log(f'>>> {line}', 'send')
+                self._log('  ⚠ 未接続', 'error')
+                return
+            self._send_serial(line)
 
     def _cmd_history(self, direction):
         """↑↓キーでコマンド履歴を辿る"""
@@ -2007,6 +2302,211 @@ class PlasmaCamApp:
                 sub.add_command(label='削除',
                                 command=lambda n=name: self._delete_layout(n))
                 self._layout_menu.add_cascade(label=f'  {name}', menu=sub)
+
+    # ------------------------------------------------------------------ CAM設定ファイル入出力
+    # ------------------------------------------------------------------ CAM計画ファイル入出力
+    def save_cam_plan(self):
+        """CAM計画（切断順序・リードイン方向）をJSONファイルに保存"""
+        import json
+        plan = self.get_cam_plan()
+        if not plan:
+            messagebox.showwarning('警告', 'CAM計画がありません。DXFを先に読み込んでください。')
+            return
+        filename = filedialog.asksaveasfilename(
+            title='CAM計画を保存',
+            defaultextension='.cam_plan.json',
+            filetypes=[('CAM計画ファイル', '*.cam_plan.json'),
+                       ('JSONファイル', '*.json'), ('すべて', '*.*')]
+        )
+        if not filename:
+            return
+        data = {
+            '_comment': 'Plasma CAM plan — cutting order & lead-in settings',
+            'plan': [
+                {
+                    'entry_name': item['entry']['name'],
+                    'path_idx':   item['path_idx'],
+                    'is_inner':   item['is_inner'],
+                    'leadin':     item.get('leadin', 'inside'),
+                    'label':      item.get('label', ''),
+                }
+                for item in plan
+            ]
+        }
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self._log(f'💾 CAM計画を保存: {os.path.basename(filename)}', 'info')
+            messagebox.showinfo('完了', f'CAM計画を保存しました:\n{filename}')
+        except Exception as e:
+            messagebox.showerror('エラー', f'保存に失敗しました:\n{e}')
+
+    def load_cam_plan(self):
+        """CAM計画JSONファイルを読み込んで適用"""
+        import json
+        if not self.dxf_entries:
+            messagebox.showwarning('警告', 'DXFファイルを先に開いてください')
+            return
+        filename = filedialog.askopenfilename(
+            title='CAM計画を読み込み',
+            filetypes=[('CAM計画ファイル', '*.cam_plan.json'),
+                       ('JSONファイル', '*.json'), ('すべて', '*.*')]
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror('エラー', f'ファイルの読み込みに失敗:\n{e}')
+            return
+
+        saved = data.get('plan', [])
+        if not saved:
+            messagebox.showwarning('警告', 'CAM計画データが空です')
+            return
+
+        entry_map = {e['name']: e for e in self.dxf_entries}
+        new_plan = []
+        missing  = []
+        for item in saved:
+            name     = item.get('entry_name', '')
+            path_idx = item.get('path_idx', 0)
+            entry    = entry_map.get(name)
+            if entry is None:
+                missing.append(name)
+                continue
+            if path_idx >= len(entry['paths']):
+                missing.append(f'{name}[{path_idx}]')
+                continue
+            new_plan.append({
+                'entry':    entry,
+                'path_idx': path_idx,
+                'path':     entry['paths'][path_idx],
+                'is_inner': item.get('is_inner', False),
+                'leadin':   item.get('leadin', 'inside'),
+                'label':    item.get('label', name),
+            })
+
+        if not new_plan:
+            messagebox.showerror('エラー',
+                '読み込めるパスがありませんでした。\n'
+                '同じDXFファイルが読み込まれているか確認してください。')
+            return
+
+        self.apply_cam_plan(new_plan)
+        self._update_path_listbox()
+        self._draw_paths()
+
+        msg = f'CAM計画を読み込みました: {len(new_plan)}パス'
+        if missing:
+            msg += f'\n\n⚠ 見つからなかったパス: {len(missing)}件\n' + '\n'.join(missing[:5])
+        self._log(f'📂 CAM計画を読み込み: {os.path.basename(filename)} ({len(new_plan)}パス)', 'info')
+        messagebox.showinfo('読み込み完了', msg)
+
+    def export_cam_settings(self):
+        """CAM設定をJSONファイルに書き出す"""
+        try:
+            settings = self._get_settings()
+        except ValueError:
+            messagebox.showerror('エラー', '設定値に無効な数値があります')
+            return
+
+        filename = filedialog.asksaveasfilename(
+            title='CAM設定を書き出し',
+            defaultextension='.cam.json',
+            filetypes=[('CAM設定ファイル', '*.cam.json'), ('JSONファイル', '*.json'), ('すべて', '*.*')]
+        )
+        if not filename:
+            return
+        import json
+        data = {
+            '_comment': 'Plasma CAM settings file',
+            'feed_rate':       settings['feed_rate'],
+            'kerf_width':      settings['kerf_width'],
+            'lead_in_length':  settings['lead_in_length'],
+            'lead_in_type':    settings['lead_in_type'],
+            'lead_out_length': settings['lead_out_length'],
+            'pierce_delay':    settings['pierce_delay'],
+            'post_cut_delay':  settings['post_cut_delay'],
+            'pierce_z_height': settings['pierce_z_height'],
+        }
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self._log(f'📤 CAM設定を書き出しました: {os.path.basename(filename)}', 'info')
+            messagebox.showinfo('完了', f'CAM設定を保存しました:\n{filename}')
+        except Exception as e:
+            messagebox.showerror('エラー', f'書き出しに失敗しました:\n{e}')
+
+    def import_cam_settings(self):
+        """CAM設定JSONファイルを読み込んでUIに反映する"""
+        filename = filedialog.askopenfilename(
+            title='CAM設定を読み込み',
+            filetypes=[('CAM設定ファイル', '*.cam.json'), ('JSONファイル', '*.json'), ('すべて', '*.*')]
+        )
+        if not filename:
+            return
+        import json
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror('エラー', f'ファイルの読み込みに失敗しました:\n{e}')
+            return
+
+        # 各フィールドに反映（存在するキーのみ）
+        mapping = {
+            'feed_rate':       self.feed_rate,
+            'kerf_width':      self.kerf_width,
+            'lead_in_length':  self.lead_in_length,
+            'lead_out_length': self.lead_out_length,
+            'pierce_delay':    self.pierce_delay,
+            'post_cut_delay':  self.post_cut_delay,
+            'pierce_z_height': self.pierce_z_height,
+        }
+        applied = []
+        for key, var in mapping.items():
+            if key in data:
+                var.set(str(data[key]))
+                applied.append(key)
+        if 'lead_in_type' in data and data['lead_in_type'] in ('line', 'arc'):
+            self.lead_in_type.set(data['lead_in_type'])
+            applied.append('lead_in_type')
+
+        self._log(f'📥 CAM設定を読み込みました: {os.path.basename(filename)}', 'info')
+        messagebox.showinfo('読み込み完了',
+            f'CAM設定を読み込みました:\n{os.path.basename(filename)}\n\n'
+            f'反映項目: {len(applied)}件\n'
+            '変更を保存するには「💾 設定を保存」を押してください')
+
+    def _soft_reset(self):
+        """GRBL ソフトリセット (Ctrl+X) — 即時停止"""
+        if not self.ser or not self.ser.is_open:
+            return
+        self.streaming = False
+        # M5（トーチOFF）→ Ctrl+X（ソフトリセット）
+        self._send_realtime(b'!')        # まず一時停止
+        time.sleep(0.05)
+        self._tx_queue.put(('line', 'M5'))
+        time.sleep(0.05)
+        self._send_realtime(b'\x18')     # Ctrl+X ソフトリセット
+        self.root.after(0, lambda: self.send_btn.config(state=tk.DISABLED))
+        self.root.after(0, lambda: self.progress.configure(value=0))
+        self.root.after(200, lambda: self._log('⏹ 停止しました。「🔓 アラーム解除 ($X)」を押してください', 'error'))
+        self.root.after(0, lambda: self.conn_status.config(
+            text='停止中 → $X でアラーム解除してください', foreground='#FF5722'))
+
+    def _save_settings_now(self):
+        """設定を今すぐ保存する"""
+        try:
+            raw = {k: str(v) for k, v in self._get_settings().items()}
+            settings_manager.save(raw, self._presets)
+            self._log('💾 設定を保存しました', 'info')
+        except ValueError:
+            messagebox.showerror('エラー', '設定値に無効な数値があります')
+        except Exception as e:
+            messagebox.showerror('エラー', f'保存に失敗しました:\n{e}')
 
     def _on_close(self):
         self.streaming = False
@@ -2210,46 +2710,64 @@ class SimWindow:
             self._prog['value'] = 100
             return
 
-        move    = self.moves[self._target]
-        tx, ty  = move['x'], move['y']
-        rapid   = move['rapid']
-        torch   = move['torch']
+        # 1tick分のmm予算を計算（speed倍率を反映）
+        move0   = self.moves[self._target]
+        mm_budget = (self.MM_PER_TICK_RAP if move0['rapid']
+                     else self.MM_PER_TICK_CUT) * self._speed
 
-        mm_tick = (self.MM_PER_TICK_RAP if rapid
-                   else self.MM_PER_TICK_CUT) * self._speed
-        dx = tx - self._cur_x
-        dy = ty - self._cur_y
-        dist = math.hypot(dx, dy)
+        nx, ny   = self._cur_x, self._cur_y
+        torch    = move0['torch']
+        rapid    = move0['rapid']
 
-        if dist < 0.5:
-            self._cur_x, self._cur_y = tx, ty
-            self._target += 1
-            self._after_id = self._win.after(1, self._tick)
-            return
+        # ── mm予算を使い切るまで複数ポイントを処理 ──────
+        while mm_budget > 1e-6 and self._target < len(self.moves):
+            move  = self.moves[self._target]
+            tx, ty = move['x'], move['y']
+            torch  = move['torch']
+            rapid  = move['rapid']
 
-        t  = min(mm_tick / dist, 1.0)
-        nx = self._cur_x + dx * t
-        ny = self._cur_y + dy * t
+            dx   = tx - nx
+            dy   = ty - ny
+            dist = math.hypot(dx, dy)
 
-        # 線を描く
-        x1, y1 = self._to_canvas(self._cur_x, self._cur_y)
-        x2, y2 = self._to_canvas(nx, ny)
-        color  = '#ff8833' if rapid else '#44ff88'
-        dash   = (4, 4) if rapid else None
-        width  = 1 if rapid else 2
-        self._cv.create_line(x1, y1, x2, y2,
-                             fill=color, width=width,
-                             dash=dash, tags='trace')
+            if dist < 0.01:          # ほぼ同一点 → スキップ
+                self._target += 1
+                continue
+
+            t = min(mm_budget / dist, 1.0)
+            ex = nx + dx * t
+            ey = ny + dy * t
+
+            # 線を描く
+            x1, y1 = self._to_canvas(nx, ny)
+            x2, y2 = self._to_canvas(ex, ey)
+            color  = '#ff8833' if rapid else '#44ff88'
+            dash   = (4, 4)    if rapid else None
+            width  = 1         if rapid else 2
+            self._cv.create_line(x1, y1, x2, y2,
+                                 fill=color, width=width,
+                                 dash=dash, tags='trace')
+
+            mm_budget -= dist * t
+            nx, ny = ex, ey
+
+            if t >= 1.0:             # このポイントに到達 → 次へ
+                self._target += 1
+            else:
+                break                # 予算切れ
+
+        self._cur_x, self._cur_y = nx, ny
 
         # トーチマーカー
         self._cv.delete('torch')
-        r = 6
+        r  = 6
         tc = '#ffff00' if torch else '#ffffff'
+        x2, y2 = self._to_canvas(nx, ny)
         self._cv.create_oval(x2-r, y2-r, x2+r, y2+r,
                              fill=tc, outline='white',
                              width=1, tags='torch')
-        # 切削中の火花
-        if torch and not rapid:
+        # 切削中の火花（低速時のみ描画してパフォーマンス確保）
+        if torch and not rapid and self._speed <= 2.0:
             import random
             for _ in range(4):
                 ang = random.uniform(0, 2*math.pi)
@@ -2262,10 +2780,8 @@ class SimWindow:
                     width=1, tags='spark')
                 self._win.after(60, lambda i=sid: self._cv.delete(i))
 
-        self._cur_x, self._cur_y = nx, ny
-
         # UI更新
-        pct = int(self._target / len(self.moves) * 100)
+        pct = int(self._target / max(len(self.moves), 1) * 100)
         self._prog['value'] = pct
         self._info_var.set(
             f'{self._target}/{len(self.moves)}  '
@@ -2360,6 +2876,14 @@ class CamEditorWindow:
                    command=self._apply).pack(side=tk.RIGHT, padx=3)
         ttk.Button(btn_frame, text='キャンセル',
                    command=win.destroy).pack(side=tk.RIGHT, padx=3)
+
+        # ── 保存/読み込み行 ──
+        io_frame = ttk.Frame(win)
+        io_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
+        ttk.Button(io_frame, text='💾 この計画を保存',
+                   command=self._save_plan).pack(side=tk.LEFT, padx=3)
+        ttk.Button(io_frame, text='📂 計画を読み込み',
+                   command=self._load_plan).pack(side=tk.LEFT, padx=3)
 
         # ── 凡例 ──
         leg = ttk.Frame(win)
@@ -2469,7 +2993,6 @@ class CamEditorWindow:
         # 安全高さに上げてから移動
         self.app._send_serial(f'G0 Z{safe_z:.3f}')
         self.app._send_serial(f'G0 X{sx:.3f} Y{sy:.3f}')
-        self.app._log(f'>>> 🎯 G0 X{sx:.3f} Y{sy:.3f}  (パス{idx+1} 開始点)', 'send')
 
     def _on_double_click(self, e):
         self._toggle_leadin()
@@ -2505,6 +3028,91 @@ class CamEditorWindow:
                             f'{len(self.plan)}パスのCAM計画を適用しました。\n'
                             '「▶ プレビュー」または「💾 保存」で確認できます。')
         self._win.destroy()
+
+    def _save_plan(self):
+        """CAMエディター内から計画を保存"""
+        import json
+        from tkinter import filedialog as fd
+        filename = fd.asksaveasfilename(
+            parent=self._win,
+            title='CAM計画を保存',
+            defaultextension='.cam_plan.json',
+            filetypes=[('CAM計画ファイル', '*.cam_plan.json'),
+                       ('JSONファイル', '*.json')]
+        )
+        if not filename:
+            return
+        data = {
+            '_comment': 'Plasma CAM plan — cutting order & lead-in settings',
+            'plan': [
+                {
+                    'entry_name': item['entry']['name'],
+                    'path_idx':   item['path_idx'],
+                    'is_inner':   item['is_inner'],
+                    'leadin':     item.get('leadin', 'inside'),
+                    'label':      item.get('label', ''),
+                }
+                for item in self.plan
+            ]
+        }
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo('完了', f'CAM計画を保存しました:\n{filename}',
+                                parent=self._win)
+        except Exception as e:
+            messagebox.showerror('エラー', f'保存に失敗:\n{e}', parent=self._win)
+
+    def _load_plan(self):
+        """CAMエディター内から計画を読み込み"""
+        import json
+        from tkinter import filedialog as fd
+        filename = fd.askopenfilename(
+            parent=self._win,
+            title='CAM計画を読み込み',
+            filetypes=[('CAM計画ファイル', '*.cam_plan.json'),
+                       ('JSONファイル', '*.json')]
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror('エラー', f'読み込み失敗:\n{e}', parent=self._win)
+            return
+
+        saved = data.get('plan', [])
+        entry_map = {e['name']: e for e in self.app.dxf_entries}
+        new_plan = []
+        missing  = []
+        for item in saved:
+            name     = item.get('entry_name', '')
+            path_idx = item.get('path_idx', 0)
+            entry    = entry_map.get(name)
+            if entry is None or path_idx >= len(entry['paths']):
+                missing.append(f'{name}[{path_idx}]')
+                continue
+            new_plan.append({
+                'entry':    entry,
+                'path_idx': path_idx,
+                'path':     entry['paths'][path_idx],
+                'is_inner': item.get('is_inner', False),
+                'leadin':   item.get('leadin', 'inside'),
+                'label':    item.get('label', name),
+            })
+
+        if not new_plan:
+            messagebox.showerror('エラー', '読み込めるパスがありませんでした。',
+                                 parent=self._win)
+            return
+
+        self.plan = new_plan
+        self._refresh()
+        msg = f'{len(new_plan)}パスを読み込みました'
+        if missing:
+            msg += f'\n⚠ 見つからなかったパス: {len(missing)}件'
+        messagebox.showinfo('完了', msg, parent=self._win)
 
     def _on_close_editor(self):
         self.app.clear_highlight()

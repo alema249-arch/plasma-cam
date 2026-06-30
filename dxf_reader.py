@@ -2,7 +2,7 @@ import ezdxf
 import math
 from typing import List, Tuple
 
-TOLERANCE = 0.1       # チェーン結合の許容距離 (mm)
+TOLERANCE = 0.5       # チェーン結合の許容距離 (mm)  ※Rコーナーの接続ミス防止のため0.5に設定
 AUTO_CLOSE_TOL = 1.0  # この距離以内なら自動クローズ (mm)
 
 
@@ -86,8 +86,12 @@ def entity_to_segments(entity) -> List[Segment]:
         cx = entity.dxf.center.x
         cy = entity.dxf.center.y
         r = entity.dxf.radius
-        s = (cx + r, cy)
-        segs.append(Segment('arc', s, s, (cx, cy, r, 0, 360, True)))
+        # GRBLは start=end の全円 G2/G3 を実行しない場合があるため
+        # 180°ずつ2本のアークに分割する
+        s1 = (cx + r, cy)   # 0°
+        s2 = (cx - r, cy)   # 180°
+        segs.append(Segment('arc', s1, s2, (cx, cy, r,   0, 180, True)))
+        segs.append(Segment('arc', s2, s1, (cx, cy, r, 180, 360, True)))
 
     elif t == 'LWPOLYLINE':
         pts = list(entity.get_points())
@@ -109,6 +113,30 @@ def entity_to_segments(entity) -> List[Segment]:
                     segs.append(arc_seg)
 
     elif t == 'SPLINE':
+        try:
+            pts = list(entity.flattening(0.1))
+            for i in range(len(pts) - 1):
+                p1 = (pts[i].x, pts[i].y)
+                p2 = (pts[i + 1].x, pts[i + 1].y)
+                segs.append(Segment('line', p1, p2, (p1, p2)))
+        except Exception:
+            pass
+
+    elif t == 'POLYLINE':
+        # 旧式 2D ポリライン
+        try:
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+            closed = bool(entity.dxf.flags & 1)
+            n = len(pts)
+            if n >= 2:
+                for i in range(n - 1 + (1 if closed else 0)):
+                    p1 = pts[i % n]
+                    p2 = pts[(i + 1) % n]
+                    segs.append(Segment('line', p1, p2, (p1, p2)))
+        except Exception:
+            pass
+
+    elif t == 'ELLIPSE':
         try:
             pts = list(entity.flattening(0.1))
             for i in range(len(pts) - 1):
@@ -233,10 +261,28 @@ def chain_segments(segments: List[Segment]) -> List[Path]:
     return paths
 
 
+def collect_segments(entity, segments: list):
+    """INSERT（ブロック参照）を再帰展開しながらセグメントを収集する"""
+    if entity.dxftype() == 'INSERT':
+        try:
+            for sub in entity.virtual_entities():
+                collect_segments(sub, segments)
+        except Exception:
+            pass
+    else:
+        segments.extend(entity_to_segments(entity))
+
+
 def read_dxf(filename: str) -> List[Path]:
     doc = ezdxf.readfile(filename)
     msp = doc.modelspace()
     segments = []
+    entity_types: dict = {}
     for entity in msp:
-        segments.extend(entity_to_segments(entity))
-    return chain_segments(segments)
+        t = entity.dxftype()
+        entity_types[t] = entity_types.get(t, 0) + 1
+        collect_segments(entity, segments)
+    paths = chain_segments(segments)
+    # 診断情報を属性として付与（main.py でログ出力に使う）
+    read_dxf._last_entity_types = entity_types
+    return paths
