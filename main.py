@@ -1,8 +1,8 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import matplotlib.pyplot as plt
 import matplotlib
 import matplotlib.patches as mpatches
+from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os
 import threading
@@ -151,7 +151,8 @@ class PlasmaCamApp:
             fg='#333', font=('Consolas', 9))
         self._goto_pos_label.pack(side=tk.LEFT, padx=8)
 
-        self.fig, self.ax = plt.subplots(figsize=(8, 7))
+        self.fig = Figure(figsize=(8, 7))
+        self.ax = self.fig.add_subplot(111)
         self.fig.subplots_adjust(bottom=0.04, top=0.96, left=0.08, right=0.98)
         self.canvas_widget = FigureCanvasTkAgg(self.fig, master=cf)
         self.canvas_widget.get_tk_widget().pack(fill=tk.BOTH, expand=True)

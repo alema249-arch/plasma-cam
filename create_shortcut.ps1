@@ -2,16 +2,20 @@
 # 職場・自宅どちらのPCでもこのファイルを右クリック→「PowerShellで実行」するだけでOK
 
 $appDir   = $PSScriptRoot
-$exePath  = "$appDir\dist\PlasmaCam.exe"
+# onedir形式(dist\PlasmaCam\PlasmaCam.exe)を優先。
+# 古いonefile形式(dist\PlasmaCam.exe)が残っていればそちらにフォールバック。
+$exePathDir  = "$appDir\dist\PlasmaCam\PlasmaCam.exe"
+$exePathFile = "$appDir\dist\PlasmaCam.exe"
 $iconPath = "$appDir\plasma_cam.ico"
 
 $lnkPath = "$env:USERPROFILE\Desktop\PlasmaCam.lnk"
 $WshShell = New-Object -ComObject WScript.Shell
 $sc = $WshShell.CreateShortcut($lnkPath)
 
-if (Test-Path $exePath) {
-    # ビルド済みEXEがあればそれを直接起動
-    $sc.TargetPath = $exePath
+if (Test-Path $exePathDir) {
+    $sc.TargetPath = $exePathDir
+} elseif (Test-Path $exePathFile) {
+    $sc.TargetPath = $exePathFile
 } else {
     # EXEがなければ python main.py にフォールバック
     $pythonw = (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source
