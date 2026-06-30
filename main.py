@@ -1802,12 +1802,13 @@ class PlasmaCamApp:
                 path = entry['paths'][idx]
                 pts = path.get_display_points()
                 ptype = '穴' if inner_flags[idx] else '外形'
+                # 穴は内側(捨て材)へ、外形は外側(捨て材)へピアス
                 plan.append({
                     'entry':    entry,
                     'path_idx': idx,
                     'path':     path,
                     'is_inner': inner_flags[idx],
-                    'leadin':   'inside',   # 'inside' or 'outside'
+                    'leadin':   'inside' if inner_flags[idx] else 'outside',
                     'label':    f"{entry['name']} [{ptype}]",
                 })
         self._cam_plan = plan
@@ -3015,7 +3016,8 @@ class CamEditorWindow:
                     'path_idx': idx,
                     'path':     path,
                     'is_inner': inner_flags[idx],
-                    'leadin':   old['leadin'] if old else 'inside',
+                    'leadin':   old['leadin'] if old else
+                                ('inside' if inner_flags[idx] else 'outside'),
                     'label':    f"{entry['name']} [{ptype}]",
                 })
         self.plan = new_plan

@@ -264,9 +264,14 @@ def _calc_lead_start_dir(path, offset_pts, leadin, lead_len, ox, oy):
 
 def _hierarchical_order(paths, ox, oy):
     """
-    Point-in-polygon で包含深さを計算。
+    ポリゴン同士の包含関係で入れ子の深さを判定する。
     深い(内側に多く包まれている)ものほど先に切断。
     同じ深さは最近隣法で並べる。
+
+    深さは「パスiの重心を他のポリゴンが含むか」ではなく、
+    「他のポリゴン全体がパスiを完全に包含するか」で判定する。
+    同心円のように複数のパスの重心が一致するケースでは、
+    重心だけを見ると大小関係を区別できず深さ計算が壊れるため。
     """
     polys = []
     for p in paths:
@@ -289,11 +294,10 @@ def _hierarchical_order(paths, ox, oy):
         if polys[i] is None:
             depths.append(0)
             continue
-        centroid = polys[i].centroid
         depth = sum(
             1 for j in range(n)
             if j != i and polys[j] is not None
-            and polys[j].contains(centroid)
+            and polys[j].contains(polys[i])
         )
         depths.append(depth)
 

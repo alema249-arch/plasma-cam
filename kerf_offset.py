@@ -35,7 +35,8 @@ def compute_path_types(paths) -> List[bool]:
     Returns a list of booleans: True = inner (hole), False = outer.
 
     Detection method:
-    1. Shapely centroid containment (most accurate)
+    1. Shapely full-polygon containment (most accurate; robust to concentric
+       shapes sharing the same centroid, unlike a centroid-point test)
     2. Bounding-box containment fallback (handles open/invalid outer boundary)
     """
     polys = [_build_poly(p, resolution=64) if p.closed else None for p in paths]
@@ -57,12 +58,13 @@ def compute_path_types(paths) -> List[bool]:
             result.append(False)
             continue
 
-        centroid = poly.centroid
-
-        # ── 方法1: Shapely ポリゴン内包チェック ──────────────
+        # ── 方法1: ポリゴン全体の内包チェック ──────────────
+        # 重心点だけで判定すると、同心円のように複数パスの重心が
+        # 一致するケースで大小関係を区別できず深さが壊れるため、
+        # ポリゴン全体が完全に包含されているかで判定する。
         depth = sum(
             1 for j, other in enumerate(polys)
-            if j != i and other is not None and other.contains(centroid)
+            if j != i and other is not None and other.contains(poly)
         )
 
         # ── 方法2: バウンディングボックス内包フォールバック ───
