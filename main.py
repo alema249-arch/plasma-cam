@@ -304,6 +304,7 @@ class PlasmaCamApp:
                 self._apply_layout_dict(saved)
             else:
                 self._apply_default_layout()
+            self.root.state('zoomed')   # 起動時は最大化
             self.root.unbind('<Map>')
         self.root.bind('<Map>', _init_sash)
 
