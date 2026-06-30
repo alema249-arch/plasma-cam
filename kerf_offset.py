@@ -35,11 +35,13 @@ def compute_path_types(paths) -> List[bool]:
     Returns a list of booleans: True = inner (hole), False = outer.
 
     Detection method:
-    1. Shapely full-polygon containment (most accurate; robust to concentric
-       shapes sharing the same centroid, unlike a centroid-point test)
+    1. Centroid containment combined with area comparison (robust to both
+       concentric shapes sharing the same centroid, and to floating-point
+       imprecision near corners that breaks strict full-polygon containment)
     2. Bounding-box containment fallback (handles open/invalid outer boundary)
     """
     polys = [_build_poly(p, resolution=64) if p.closed else None for p in paths]
+    areas = [poly.area if poly is not None else 0.0 for poly in polys]
 
     # バウンディングボックスを全パスで計算（open pathも含む）
     bboxes = []
@@ -58,13 +60,18 @@ def compute_path_types(paths) -> List[bool]:
             result.append(False)
             continue
 
-        # ── 方法1: ポリゴン全体の内包チェック ──────────────
+        # ── 方法1: 重心の内包チェック + 面積比較 ──────────────
         # 重心点だけで判定すると、同心円のように複数パスの重心が
-        # 一致するケースで大小関係を区別できず深さが壊れるため、
-        # ポリゴン全体が完全に包含されているかで判定する。
+        # 一致するケースで大小関係を区別できず深さが壊れる。
+        # 一方、ポリゴン全体の厳密な内包だけで判定すると、円弧を
+        # 線分近似した際の微小な誤差で角付近の穴を誤判定すること
+        # があるため、自分より面積の大きいポリゴンに限定して
+        # 重心が含まれるかで判定する。
+        centroid = poly.centroid
         depth = sum(
             1 for j, other in enumerate(polys)
-            if j != i and other is not None and other.contains(poly)
+            if j != i and other is not None
+            and areas[j] > areas[i] and other.contains(centroid)
         )
 
         # ── 方法2: バウンディングボックス内包フォールバック ───

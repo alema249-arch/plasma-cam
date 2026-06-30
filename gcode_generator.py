@@ -268,10 +268,12 @@ def _hierarchical_order(paths, ox, oy):
     深い(内側に多く包まれている)ものほど先に切断。
     同じ深さは最近隣法で並べる。
 
-    深さは「パスiの重心を他のポリゴンが含むか」ではなく、
-    「他のポリゴン全体がパスiを完全に包含するか」で判定する。
-    同心円のように複数のパスの重心が一致するケースでは、
-    重心だけを見ると大小関係を区別できず深さ計算が壊れるため。
+    深さは「パスiの重心を、自分より面積の大きい他のポリゴンjが
+    含むか」で判定する。重心だけで判定すると同心円のように複数の
+    パスの重心が一致するケースで大小関係を区別できず、逆にポリゴン
+    全体の厳密な内包(contains)だけで判定すると、円弧を線分近似した
+    際の微小な誤差で角付近の穴が「内包されていない」と誤判定される
+    ことがあるため、面積比較を組み合わせて両方の問題を回避する。
     """
     polys = []
     for p in paths:
@@ -288,16 +290,20 @@ def _hierarchical_order(paths, ox, oy):
         except Exception:
             polys.append(None)
 
+    areas = [poly.area if poly is not None else 0.0 for poly in polys]
+
     n = len(paths)
     depths = []
     for i in range(n):
         if polys[i] is None:
             depths.append(0)
             continue
+        centroid = polys[i].centroid
         depth = sum(
             1 for j in range(n)
             if j != i and polys[j] is not None
-            and polys[j].contains(polys[i])
+            and areas[j] > areas[i]
+            and polys[j].contains(centroid)
         )
         depths.append(depth)
 
