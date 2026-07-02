@@ -12,6 +12,7 @@ import re
 import math
 import serial
 import serial.tools.list_ports
+from tkinterdnd2 import DND_FILES, TkinterDnD
 
 matplotlib.rcParams['font.family'] = ['Yu Gothic', 'MS Gothic', 'Meiryo', 'sans-serif']
 
@@ -63,6 +64,10 @@ class PlasmaCamApp:
         self._build_menu()
         self._build_ui()
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+
+        # ウィンドウへのDXFドラッグ&ドロップに対応
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self._on_drop_files)
 
     # ------------------------------------------------------------------ scroll tab helper
     def _make_scroll_tab(self, notebook, label):
@@ -1716,6 +1721,19 @@ class PlasmaCamApp:
         )
         if not filename:
             return
+        self._load_dxf_file(filename)
+
+    def _on_drop_files(self, event):
+        """ウィンドウにドラッグ&ドロップされたDXFファイルを読み込む"""
+        paths = self.root.tk.splitlist(event.data)
+        dxf_paths = [p for p in paths if p.lower().endswith('.dxf')]
+        if not dxf_paths:
+            messagebox.showwarning('警告', 'DXFファイルをドロップしてください')
+            return
+        for filename in dxf_paths:
+            self._load_dxf_file(filename)
+
+    def _load_dxf_file(self, filename):
         try:
             paths = read_dxf(filename)
             name = os.path.basename(filename)
@@ -3124,6 +3142,6 @@ class CamEditorWindow:
 
 
 if __name__ == '__main__':
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
     app = PlasmaCamApp(root)
     root.mainloop()

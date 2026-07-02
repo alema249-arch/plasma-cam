@@ -8,7 +8,7 @@ $exePathDir  = "$appDir\dist\PlasmaCam\PlasmaCam.exe"
 $exePathFile = "$appDir\dist\PlasmaCam.exe"
 $iconPath = "$appDir\plasma_cam.ico"
 
-$lnkPath = "$env:USERPROFILE\Desktop\PlasmaCam.lnk"
+$lnkPath = "$([Environment]::GetFolderPath('Desktop'))\PlasmaCam.lnk"
 $WshShell = New-Object -ComObject WScript.Shell
 $sc = $WshShell.CreateShortcut($lnkPath)
 

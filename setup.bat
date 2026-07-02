@@ -16,7 +16,7 @@ if %errorlevel% neq 0 (
 
 echo Python が見つかりました。ライブラリをインストール中...
 echo.
-python -m pip install ezdxf matplotlib pyserial shapely
+python -m pip install ezdxf matplotlib pyserial shapely tkinterdnd2
 echo.
 echo =========================================
 echo  インストール完了！
