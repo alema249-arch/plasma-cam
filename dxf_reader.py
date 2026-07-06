@@ -18,8 +18,11 @@ class Path:
     def __init__(self, segments: List[Segment], closed: bool = False):
         self.segments = segments
         self.closed = closed
+        self._cache = {}  # キャッシュ: {resolution: points}
 
     def get_display_points(self, resolution=36):
+        if resolution in self._cache:
+            return self._cache[resolution]
         points = []
         for seg in self.segments:
             if seg.type == 'line':
@@ -33,6 +36,7 @@ class Path:
                 points.extend(pts)
         if self.closed and len(points) > 1:
             points.append(points[0])
+        self._cache[resolution] = points
         return points
 
 

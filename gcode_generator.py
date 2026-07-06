@@ -26,7 +26,15 @@ def _common_settings(settings):
         'pierce_z_height':  float(settings.get('pierce_z_height', 0.0)),
         'cut_z_height':     float(settings.get('cut_z_height', 0.0)),
         'home_z_clearance': float(settings.get('home_z_clearance', 0.0)),
+        'stencil':          _parse_bool(settings.get('stencil_mode', False)),
     }
+
+
+def _parse_bool(v) -> bool:
+    """設定値のbool解釈（JSON保存で文字列化された 'True'/'1' も受ける）"""
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ('1', 'true', 'on', 'yes')
 
 
 def generate_gcode(dxf_entries: list, settings: dict) -> str:
@@ -63,7 +71,8 @@ def generate_gcode(dxf_entries: list, settings: dict) -> str:
         def px(x): return x + ox
         def py(y): return y + oy
 
-        order, inner_flags = _hierarchical_order(paths, ox, oy)
+        order, inner_flags = _hierarchical_order(paths, ox, oy,
+                                                 stencil=p['stencil'])
 
         for idx in order:
             path     = paths[idx]
@@ -240,21 +249,19 @@ def _calc_lead_start_dir(path, offset_pts, leadin, lead_len, ox, oy):
     if not all_pts:
         return (sx + ox, sy + oy)
 
+    if leadin == 'inside':
+        # 輪郭の内側（捨て材）。凹形状でも外れないよう検証付き
+        qx, qy = _find_inside_point(sx, sy, all_pts, lead_len)
+        return (qx + ox, qy + oy)
+
     cx = sum(p[0] for p in all_pts) / len(all_pts)
     cy = sum(p[1] for p in all_pts) / len(all_pts)
     dx, dy = cx - sx, cy - sy
     d = math.hypot(dx, dy)
     if d < 1e-10:
         return (sx + ox, sy + oy)
-
-    if leadin == 'inside':
-        # 重心方向（内側）。穴サイズを超えないよう 85% に制限
-        eff = min(lead_len, d * 0.85)
-        nx, ny = dx/d * eff, dy/d * eff
-    else:
-        # 重心逆方向（外側）
-        nx, ny = -dx/d * lead_len, -dy/d * lead_len
-
+    # 重心逆方向（外側）
+    nx, ny = -dx/d * lead_len, -dy/d * lead_len
     return (sx + nx + ox, sy + ny + oy)
 
 
@@ -262,11 +269,16 @@ def _calc_lead_start_dir(path, offset_pts, leadin, lead_len, ox, oy):
 # 切断順序: 階層検出 + 最近隣
 # ======================================================================
 
-def _hierarchical_order(paths, ox, oy):
+def _hierarchical_order(paths, ox, oy, stencil=False):
     """
     ポリゴン同士の包含関係で入れ子の深さを判定する。
     深い(内側に多く包まれている)ものほど先に切断。
     同じ深さは最近隣法で並べる。
+
+    stencil=True はステンシル用: 板そのものが製品で、全ての輪郭は
+    「板に開ける穴」の一部になるため、穴/外形の判定を反転させる
+    （最外周の輪郭 → 穴として内側の捨て材にピアス、
+      島の輪郭 → 外形として島の外側の捨て材にピアス）。
 
     深さは「パスiの重心を、自分より面積の大きい他のポリゴンjが
     含むか」で判定する。重心だけで判定すると同心円のように複数の
@@ -292,6 +304,18 @@ def _hierarchical_order(paths, ox, oy):
 
     areas = [poly.area if poly is not None else 0.0 for poly in polys]
 
+    # 閉じているのに面積が実質ゼロの退化パス（DXFのゴミや、線つなぎ処理が
+    # 尖った先端で作ってしまうカケラ）は切断対象から除外する。
+    # 退化ポリゴンは buffer(0) で空になり polys が None になるため、
+    # 「閉じているのにポリゴン化できない」ものも対象。開いた線分は切る。
+    MIN_AREA = 0.05
+    skip = set()
+    for i, pa in enumerate(paths):
+        if pa.closed and (polys[i] is None or areas[i] < MIN_AREA):
+            skip.add(i)
+            polys[i] = None
+            areas[i] = 0.0
+
     n = len(paths)
     depths = []
     for i in range(n):
@@ -308,7 +332,8 @@ def _hierarchical_order(paths, ox, oy):
         depths.append(depth)
 
     # is_inner: 奇数深さ = 穴, 偶数(1以上) = 外形内ネスト
-    inner_flags = [d % 2 == 1 for d in depths]
+    # ステンシルでは全体が板の穴なので偶奇が1つずれる → 反転
+    inner_flags = [(d % 2 == 1) != stencil for d in depths]
 
     def centroid_xy(idx):
         pts = paths[idx].get_display_points()
@@ -342,7 +367,7 @@ def _hierarchical_order(paths, ox, oy):
     order = []
     last_pos = None
     for depth in range(max_depth, -1, -1):
-        group = [i for i,d in enumerate(depths) if d == depth]
+        group = [i for i,d in enumerate(depths) if d == depth and i not in skip]
         if not group:
             continue
         ordered = nearest_neighbor(group, last_pos)
@@ -356,6 +381,42 @@ def _hierarchical_order(paths, ox, oy):
 # ======================================================================
 # リードイン始点: 法線ベクトル方式
 # ======================================================================
+
+def _find_inside_point(sx, sy, all_pts, lead_len):
+    """開始点(sx,sy)から輪郭の「内側」に確実に入るリードイン始点を探す。
+
+    重心方向や法線方向の推測では、C字形など凹んだ輪郭や角の始点で
+    外れることがある。そこで始点を中心とする半径 lead_len の円と
+    輪郭内部の交わりのうち始点に接する部分を取り、その内部点
+    （representative_point ＝ 必ずポリゴン内部にある点）を返す。
+    どんな形状でも内側であることが保証される。"""
+    try:
+        poly = Polygon(all_pts)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            return (sx, sy)
+    except Exception:
+        return (sx, sy)
+
+    start = Point(sx, sy)
+    for r in (lead_len, lead_len * 0.5, lead_len * 0.25, 0.5):
+        if r <= 0:
+            continue
+        try:
+            region = poly.intersection(start.buffer(r))
+        except Exception:
+            continue
+        comps = list(region.geoms) if hasattr(region, "geoms") else [region]
+        # 始点に接している内部領域だけが対象（離れた領域へは飛ばない）
+        comps = [c for c in comps
+                 if c.geom_type == "Polygon" and c.area > 1e-6
+                 and c.distance(start) < 1e-6]
+        if comps:
+            q = max(comps, key=lambda c: c.area).representative_point()
+            return (q.x, q.y)
+    return (sx, sy)
+
 
 def _calc_lead_start(path, offset_pts, is_inner, lead_len, ox, oy):
     """
@@ -385,22 +446,18 @@ def _calc_lead_start(path, offset_pts, is_inner, lead_len, ox, oy):
     else:
         return (sx + ox, sy + oy)
 
-    # 重心→開始点 の方向（内向き単位ベクトル）
+    if is_inner:
+        # 穴: 輪郭の内側（捨て材）にピアス。凹形状でも外れないよう検証付き
+        qx, qy = _find_inside_point(sx, sy, all_pts, lead_len)
+        return (qx + ox, qy + oy)
+
+    # 外形: 重心の逆方向（ワーク外側にピアス）
     dx = cx - sx
     dy = cy - sy
     d  = math.hypot(dx, dy)
     if d < 1e-10:
         return (sx + ox, sy + oy)
-
-    if is_inner:
-        # 穴: 重心方向（内側にピアス）
-        # リードイン長が穴サイズを超えると外に出るため 85% に自動制限
-        eff = min(lead_len, d * 0.85)
-        nx, ny = dx / d * eff, dy / d * eff
-    else:
-        # 外形: 重心の逆方向（ワーク外側にピアス）
-        nx, ny = -dx / d * lead_len, -dy / d * lead_len
-
+    nx, ny = -dx / d * lead_len, -dy / d * lead_len
     return (sx + nx + ox, sy + ny + oy)
 
 

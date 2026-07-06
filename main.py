@@ -437,12 +437,14 @@ class PlasmaCamApp:
             self.canvas_widget.draw_idle()
 
     def _update_entry_display(self, entry_idx):
-        """Fast redraw for a single entry during drag."""
+        """Fast redraw for a single entry during drag (optimized with blit)."""
         if entry_idx >= len(self.dxf_entries):
             return
         e = self.dxf_entries[entry_idx]
         ox, oy = e['offset_x'], e['offset_y']
 
+        # キャッシュされたアーティストのみ更新
+        changed_artists = []
         for art in self._all_artists:
             if art['entry_idx'] != entry_idx or art['line'] is None:
                 continue
@@ -453,6 +455,7 @@ class PlasmaCamApp:
             ys = [p[1] + oy for p in pts]
             art['line'].set_xdata(xs)
             art['line'].set_ydata(ys)
+            changed_artists.append(art['line'])
 
             off_pts = art['offset_pts']
             if art['offset_line'] is not None and off_pts:
@@ -460,16 +463,20 @@ class PlasmaCamApp:
                 oys = [p[1] + oy for p in off_pts]
                 art['offset_line'].set_xdata(oxs)
                 art['offset_line'].set_ydata(oys)
+                changed_artists.append(art['offset_line'])
                 sx, sy = oxs[0], oys[0]
             else:
-                sx, sy = xs[0], ys[0]
+                sx, sy = xs[0] if xs else 0, ys[0] if ys else 0
 
             art['marker'].set_xdata([sx])
             art['marker'].set_ydata([sy])
+            changed_artists.append(art['marker'])
             if art['label'] is not None:
                 art['label'].set_position((sx, sy))
+                changed_artists.append(art['label'])
 
-        self.canvas_widget.draw_idle()
+        if changed_artists:
+            self.canvas_widget.draw_idle()
 
     def highlight_path(self, entry, path_idx):
         """指定パスをハイライト表示してキャンバスを中央寄せ"""
@@ -564,7 +571,8 @@ class PlasmaCamApp:
         for entry_idx, entry in enumerate(self.dxf_entries):
             ox, oy = entry['offset_x'], entry['offset_y']
             paths = entry['paths']
-            inner_flags = compute_path_types(paths)
+            # キャッシュを使用（なければ計算して保存）
+            inner_flags = entry.get('path_types') or compute_path_types(paths)
 
             # 内側(穴)→外側 の順に並べ替え（Gコード生成と順番を合わせる）
             order = sorted(range(len(paths)),
@@ -713,6 +721,15 @@ class PlasmaCamApp:
         ttk.Label(li_f, text='リードイン種類:', font=('',8)).pack(side=tk.LEFT)
         ttk.Radiobutton(li_f, text='直線', variable=self.lead_in_type, value='line').pack(side=tk.LEFT)
         ttk.Radiobutton(li_f, text='円弧', variable=self.lead_in_type, value='arc').pack(side=tk.LEFT)
+        ttk.Separator(li_f, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        # ステンシル: 板が製品で全輪郭が「板の穴」→ 穴/外形判定を反転し
+        # リードインを常に捨て材側（文字の内側）から入れる
+        self.stencil_mode = tk.BooleanVar(
+            value=str(s.get('stencil_mode', 'False')).strip().lower()
+                  in ('1', 'true', 'on', 'yes'))
+        ttk.Checkbutton(li_f, text='ステンシル（全て板の穴）',
+                        variable=self.stencil_mode,
+                        command=self._stencil_toggled).pack(side=tk.LEFT)
 
         # Z軸説明ラベル
         z_note = ttk.Label(sf,
@@ -1610,6 +1627,8 @@ class PlasmaCamApp:
         line_lens  = []     # 各行のバイト数
         error_msg  = None
         timeout_count = 0   # 連続タイムアウト回数
+        error_skip_count = 0  # ノイズ起因エラーでスキップした行数
+        MAX_ERROR_SKIP = 5    # これを超えたら異常と判断して停止
 
         self.ser.timeout = 2  # ストリーミング中は少し長め
         self.ser.reset_input_buffer()  # 残留データをクリア（ポーリング応答など）
@@ -1675,13 +1694,32 @@ class PlasmaCamApp:
 
                 elif r_low.startswith('error'):
                     err_line = lines[ack_count] if ack_count < total else '?'
+                    # トーチ制御(M3/M5/M8/M9)・ピアス待機(G4)が化けた場合は
+                    # 切断品質と安全に直結するため停止する。
+                    # それ以外(G1移動など)はノイズによる1行破損とみなし、
+                    # スキップして切断を続行する（軌跡への影響は軽微）。
+                    critical = bool(re.search(r'\bM0?[3589]\b|\bG0?4\b',
+                                              err_line.upper()))
+                    error_skip_count += 1
+                    if not critical and error_skip_count <= MAX_ERROR_SKIP:
+                        if line_lens:
+                            buf_used -= line_lens.pop(0)
+                        ack_count += 1
+                        self.root.after(0, lambda r=resp, l=err_line, n=ack_count:
+                                        self._log(
+                                            f'⚠️ 行{n}が通信ノイズで破損 ({r}) → '
+                                            f'スキップして続行: {l}', 'error'))
+                        continue
                     ctx_start = max(0, ack_count - 2)
                     ctx_end   = min(total, ack_count + 3)
                     ctx = '\n'.join(
                         f'  {">>>" if i == ack_count else "   "} [{i+1}] {lines[i]}'
                         for i in range(ctx_start, ctx_end))
+                    reason = ('トーチ制御コマンドが破損したため停止しました'
+                              if critical else
+                              f'エラーが{MAX_ERROR_SKIP}回を超えたため停止しました')
                     error_msg = (f'行 {ack_count+1}: {err_line}\n'
-                                 f'エラー: {resp}\n\n'
+                                 f'エラー: {resp}\n{reason}\n\n'
                                  f'前後のコマンド:\n{ctx}')
                     self.root.after(0, lambda r=resp, l=err_line, n=ack_count+1:
                                     self._log(f'❌❌❌ 行{n}でエラー: {l}  →  {r}', 'error'))
@@ -1715,13 +1753,13 @@ class PlasmaCamApp:
 
     # ------------------------------------------------------------------ DXF
     def open_dxf(self):
-        filename = filedialog.askopenfilename(
-            title='DXFファイルを選択',
+        filenames = filedialog.askopenfilenames(
+            title='DXFファイルを選択（複数選択可）',
             filetypes=[('DXF files', '*.dxf'), ('All files', '*.*')]
         )
-        if not filename:
+        if not filenames:
             return
-        self._load_dxf_file(filename)
+        self._load_dxf_batch(list(filenames))
 
     def _on_drop_files(self, event):
         """ウィンドウにドラッグ&ドロップされたDXFファイルを読み込む"""
@@ -1730,8 +1768,74 @@ class PlasmaCamApp:
         if not dxf_paths:
             messagebox.showwarning('警告', 'DXFファイルをドロップしてください')
             return
-        for filename in dxf_paths:
-            self._load_dxf_file(filename)
+        self._load_dxf_batch(dxf_paths)
+
+    def _load_dxf_batch(self, filenames):
+        """複数DXFを相対位置を保ったまま一括読み込み。
+
+        パズルピースのように共通座標系で作られた複数ファイルは、
+        ファイルごとに自動配置するとズレるため、
+        全ファイル合算の座標範囲から共通オフセットを1つだけ計算して
+        全ファイルに同じ値を適用する。
+        """
+        if len(filenames) == 1:
+            self._load_dxf_file(filenames[0])
+            return
+
+        loaded = []
+        for filename in filenames:
+            try:
+                paths = read_dxf(filename)
+                name = os.path.basename(filename)
+                etypes = getattr(read_dxf, '_last_entity_types', {})
+                etype_str = '  '.join(f'{k}×{v}' for k, v in sorted(etypes.items()))
+                self._log(f'📂 {name}  [{etype_str}]  →  {len(paths)}パス', 'info')
+                if paths:
+                    loaded.append((name, paths))
+                else:
+                    self._log('  ⚠ パスが0本: スキップ', 'error')
+            except Exception as e:
+                self._log(f'❌ {os.path.basename(filename)} 読み込みエラー: {e}', 'error')
+
+        if not loaded:
+            messagebox.showerror('エラー', '読み込めるDXFがありませんでした')
+            return
+
+        # 全ファイル合算の座標範囲 → 共通オフセット（相対位置を維持）
+        margin = 20.0
+        all_pts = [p for _, paths in loaded
+                   for path in paths for p in path.get_display_points()]
+        xs = [p[0] for p in all_pts]
+        ys = [p[1] for p in all_pts]
+        if (min(xs) >= 0 and min(ys) >= 0
+                and max(xs) <= MACHINE_W and max(ys) <= MACHINE_H):
+            # マシン範囲内なら元の座標を維持（LightBurnと同じ挙動）
+            ox, oy = 0.0, 0.0
+            self._log(f'  {len(loaded)}ファイル: 元の座標を維持（パズル配置対応）', 'info')
+        else:
+            ox = round(margin - min(xs), 1)
+            oy = round(margin - min(ys), 1)
+            self._log(f'  {len(loaded)}ファイル一括配置: 共通オフセット '
+                      f'({ox:.1f}, {oy:.1f}) で相対位置を維持', 'info')
+
+        for name, paths in loaded:
+            path_types = compute_path_types(paths)
+            self.dxf_entries.append({
+                'name': name,
+                'paths': paths,
+                'offset_x': ox,
+                'offset_y': oy,
+                'path_types': path_types,
+            })
+
+        self._cam_plan = None
+        self._update_file_listbox()
+        self.file_listbox.selection_clear(0, tk.END)
+        self.file_listbox.selection_set(len(self.dxf_entries) - 1)
+        self._on_file_select()
+        self._draw_paths()
+        self._fit_view()
+        self._update_info_label()
 
     def _load_dxf_file(self, filename):
         try:
@@ -1753,18 +1857,30 @@ class PlasmaCamApp:
                     ys = [p[1] for p in all_pts]
                     self._log(f'  座標範囲  X={min(xs):.1f}〜{max(xs):.1f}'
                               f'  Y={min(ys):.1f}〜{max(ys):.1f}', 'info')
-                    # 左下をマージン位置に揃えてマシン内に自動配置
-                    init_ox = round(margin - min(xs), 1)
-                    init_oy = round(margin - min(ys), 1)
+                    # 座標がマシン範囲内に収まっていれば元の座標を維持する
+                    # （パズルピースなど共通座標系のファイルがズレないように）
+                    if (min(xs) >= 0 and min(ys) >= 0
+                            and max(xs) <= MACHINE_W and max(ys) <= MACHINE_H):
+                        self._log('  元の座標を維持（パズル配置対応）', 'info')
+                    else:
+                        # 範囲外のみ左下をマージン位置に自動配置
+                        init_ox = round(margin - min(xs), 1)
+                        init_oy = round(margin - min(ys), 1)
+                        self._log(f'  マシン範囲外のため自動配置 '
+                                  f'({init_ox:.1f}, {init_oy:.1f})', 'info')
                 else:
                     self._log('  ⚠ パスはあるが表示点ゼロ', 'error')
             # ──────────────────────────────────────────────
+
+            # 一度だけ compute_path_types を実行してキャッシュ
+            path_types = compute_path_types(paths)
 
             self.dxf_entries.append({
                 'name': name,
                 'paths': paths,
                 'offset_x': init_ox,
                 'offset_y': init_oy,
+                'path_types': path_types,  # キャッシュ
             })
             self._cam_plan = None  # DXF変更時はCAM計画をリセット
             self._update_file_listbox()
@@ -1790,7 +1906,14 @@ class PlasmaCamApp:
             'pierce_z_height':  float(self.pierce_z_height.get()),
             'cut_z_height':     float(self.cut_z_height.get()),
             'home_z_clearance': float(self.home_z_clearance.get()),
+            'stencil_mode':     self.stencil_mode.get(),
         }
+
+    def _stencil_toggled(self):
+        """ステンシルモード切替: 穴/外形の判定が変わるためCAM計画を作り直す"""
+        self._cam_plan = None
+        mode = 'ON' if self.stencil_mode.get() else 'OFF'
+        self._log(f'ステンシルモード {mode}: 穴/外形判定とリードイン方向を再計算します')
 
     # ------------------------------------------------------------------ CAM editor
     def show_cam_editor(self):
@@ -1817,7 +1940,8 @@ class PlasmaCamApp:
         for entry in self.dxf_entries:
             ox = entry.get('offset_x', 0.0)
             oy = entry.get('offset_y', 0.0)
-            order, inner_flags = _hierarchical_order(entry['paths'], ox, oy)
+            order, inner_flags = _hierarchical_order(
+                entry['paths'], ox, oy, stencil=self.stencil_mode.get())
             for idx in order:
                 path = entry['paths'][idx]
                 pts = path.get_display_points()
@@ -2575,20 +2699,73 @@ class SimWindow:
         self._xmin = min(xs); self._xmax = max(xs)
         self._ymin = min(ys); self._ymax = max(ys)
 
+        # ズーム/パン状態と、再描画用の軌跡記録（機械座標）
+        self._zoom     = 1.0
+        self._view_cx  = (self._xmin + self._xmax) / 2
+        self._view_cy  = (self._ymin + self._ymax) / 2
+        self._trace    = []      # [(x1, y1, x2, y2, rapid)]
+        self._torch_on = False
+        self._pan_last = None
+
         self._build(parent)
         self._reset()
 
     # ── 座標変換 ──────────────────────────────────────────
-    def _to_canvas(self, x, y):
+    def _base_scale(self):
+        """全体がちょうど収まる基準スケール（ズーム1.0のとき）"""
         W = self._cv.winfo_width()  or 800
         H = self._cv.winfo_height() or 600
         pad = 40
         rng_x = max(self._xmax - self._xmin, 1)
         rng_y = max(self._ymax - self._ymin, 1)
-        scale = min((W - pad*2) / rng_x, (H - pad*2) / rng_y)
-        cx = pad + (x - self._xmin) * scale
-        cy = H - pad - (y - self._ymin) * scale   # Y軸反転
+        return min((W - pad*2) / rng_x, (H - pad*2) / rng_y)
+
+    def _to_canvas(self, x, y):
+        W = self._cv.winfo_width()  or 800
+        H = self._cv.winfo_height() or 600
+        scale = self._base_scale() * self._zoom
+        cx = W/2 + (x - self._view_cx) * scale
+        cy = H/2 - (y - self._view_cy) * scale   # Y軸反転
         return cx, cy
+
+    # ── ズーム / パン ──────────────────────────────────────
+    def _on_wheel(self, event):
+        """ホイールでカーソル位置を中心に拡大縮小"""
+        W = self._cv.winfo_width()  or 800
+        H = self._cv.winfo_height() or 600
+        old = self._base_scale() * self._zoom
+        if old <= 0:
+            return
+        factor = 1.25 if event.delta > 0 else 0.8
+        self._zoom = min(max(self._zoom * factor, 0.2), 100.0)
+        new = self._base_scale() * self._zoom
+        # カーソル下の機械座標がズーム後も同じ画面位置に来るよう中心を補正
+        mx = self._view_cx + (event.x - W/2) / old
+        my = self._view_cy - (event.y - H/2) / old
+        self._view_cx = mx - (event.x - W/2) / new
+        self._view_cy = my + (event.y - H/2) / new
+        self._redraw_all()
+
+    def _on_pan_start(self, event):
+        self._pan_last = (event.x, event.y)
+
+    def _on_pan_move(self, event):
+        if self._pan_last is None:
+            return
+        scale = self._base_scale() * self._zoom
+        if scale <= 0:
+            return
+        self._view_cx -= (event.x - self._pan_last[0]) / scale
+        self._view_cy += (event.y - self._pan_last[1]) / scale
+        self._pan_last = (event.x, event.y)
+        self._redraw_all()
+
+    def _reset_view(self, event=None):
+        """ダブルクリックで全体表示に戻す"""
+        self._zoom    = 1.0
+        self._view_cx = (self._xmin + self._xmax) / 2
+        self._view_cy = (self._ymin + self._ymax) / 2
+        self._redraw_all()
 
     # ── UI構築 ──────────────────────────────────────────
     def _build(self, parent):
@@ -2647,11 +2824,19 @@ class SimWindow:
         self._prog = ttk.Progressbar(win, mode='determinate')
         self._prog.pack(fill=tk.X, padx=8, pady=(0,2))
 
+        # 操作ヒント
+        tk.Label(leg, text='ホイール: 拡大縮小 ／ ドラッグ: 移動 ／ ダブルクリック: 全体表示',
+                 bg='#0a0a12', fg='#556677', font=('', 8)).pack(side=tk.RIGHT, padx=8)
+
         # ── Canvas ──
         self._cv = tk.Canvas(win, bg='#050508',
                              highlightthickness=0)
         self._cv.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         self._cv.bind('<Configure>', lambda e: self._redraw_all())
+        self._cv.bind('<MouseWheel>', self._on_wheel)
+        self._cv.bind('<ButtonPress-1>', self._on_pan_start)
+        self._cv.bind('<B1-Motion>', self._on_pan_move)
+        self._cv.bind('<Double-Button-1>', self._reset_view)
 
     # ── リセット ────────────────────────────────────────
     def _reset(self):
@@ -2660,6 +2845,8 @@ class SimWindow:
         if self.moves:
             self._cur_x = self.moves[0]['x']
             self._cur_y = self.moves[0]['y']
+        self._trace.clear()
+        self._torch_on = False
         self._prog['value'] = 0
         self._info_var.set('▶ を押して開始')
         self._torch_var.set('● トーチOFF')
@@ -2690,6 +2877,28 @@ class SimWindow:
                     coords += [cx, cy]
                 self._cv.create_line(*coords, fill='#223355',
                                      width=1, tags='geo')
+        # 走行済みの軌跡（ズーム・リサイズ後も消えないよう機械座標から再描画）
+        for mx1, my1, mx2, my2, rapid in self._trace:
+            x1, y1 = self._to_canvas(mx1, my1)
+            x2, y2 = self._to_canvas(mx2, my2)
+            self._cv.create_line(
+                x1, y1, x2, y2,
+                fill='#ff8833' if rapid else '#44ff88',
+                width=1 if rapid else 2,
+                dash=(4, 4) if rapid else None, tags='trace')
+        # トーチマーカー
+        self._draw_torch(self._cur_x, self._cur_y, self._torch_on)
+
+    def _draw_torch(self, x, y, torch):
+        """トーチ位置マーカーを描き直す。戻り値はキャンバス座標"""
+        self._cv.delete('torch')
+        r  = 6
+        tc = '#ffff00' if torch else '#ffffff'
+        cx, cy = self._to_canvas(x, y)
+        self._cv.create_oval(cx-r, cy-r, cx+r, cy+r,
+                             fill=tc, outline='white',
+                             width=1, tags='torch')
+        return cx, cy
 
     # ── 再生制御 ────────────────────────────────────────
     def _toggle_play(self):
@@ -2759,7 +2968,8 @@ class SimWindow:
             ex = nx + dx * t
             ey = ny + dy * t
 
-            # 線を描く
+            # 線を描く（ズーム時の再描画用に機械座標でも記録）
+            self._trace.append((nx, ny, ex, ey, rapid))
             x1, y1 = self._to_canvas(nx, ny)
             x2, y2 = self._to_canvas(ex, ey)
             color  = '#ff8833' if rapid else '#44ff88'
@@ -2780,13 +2990,8 @@ class SimWindow:
         self._cur_x, self._cur_y = nx, ny
 
         # トーチマーカー
-        self._cv.delete('torch')
-        r  = 6
-        tc = '#ffff00' if torch else '#ffffff'
-        x2, y2 = self._to_canvas(nx, ny)
-        self._cv.create_oval(x2-r, y2-r, x2+r, y2+r,
-                             fill=tc, outline='white',
-                             width=1, tags='torch')
+        self._torch_on = torch
+        x2, y2 = self._draw_torch(nx, ny, torch)
         # 切削中の火花（低速時のみ描画してパフォーマンス確保）
         if torch and not rapid and self._speed <= 2.0:
             import random
@@ -3024,7 +3229,8 @@ class CamEditorWindow:
         for entry in self.app.dxf_entries:
             ox = entry.get('offset_x', 0.0)
             oy = entry.get('offset_y', 0.0)
-            order, inner_flags = _hierarchical_order(entry['paths'], ox, oy)
+            order, inner_flags = _hierarchical_order(
+                entry['paths'], ox, oy, stencil=self.app.stencil_mode.get())
             for idx in order:
                 path  = entry['paths'][idx]
                 ptype = '穴' if inner_flags[idx] else '外形'

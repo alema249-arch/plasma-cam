@@ -1,13 +1,13 @@
 {
   "settings": {
-    "feed_rate": "1000.0",
+    "feed_rate": "900.0",
     "kerf_width": "1.2",
     "lead_in_length": "2.0",
     "lead_in_type": "line",
     "lead_out_length": "1.5",
-    "pierce_delay": "1.5",
-    "post_cut_delay": "0.7",
-    "pierce_z_height": "2.0",
+    "pierce_delay": "3.0",
+    "post_cut_delay": "2.0",
+    "pierce_z_height": "2.5",
     "cut_z_height": "1.5",
     "home_z_clearance": "10.0"
   },
